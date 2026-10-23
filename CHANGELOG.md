@@ -12,6 +12,9 @@
   OpenAI-compatible Chat Completions endpoint, including local servers. Coder and reviewer may share one.
 - Model call timeout is configurable per provider (default 600s, was a fixed 90s).
 - Only tickets assigned to the agent's Jira account are picked up; unassigning stops work.
+- Second review fixes: watching an unassigned ticket's PR saves its own back-off (never
+  re-enabling coding; our back-off is capped at 1 h, a server's Retry-After is honoured in full); evidence and problem text must be non-blank; failed lesson saves
+  back off (1 min doubling to 1 h) with a single Jira notice.
 - External review fixes: first-pass reviewer findings are kept unless explicitly dropped; the
   reviewer's verdict is checked against the combined result; advisory notes from every round
   reach the PR; coordinator replies are pinned against history trimming; PR checks honour

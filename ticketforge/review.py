@@ -15,26 +15,31 @@ SEVERITIES = ("blocking", "advisory")
 CODER_ACTIONS = ("fixed", "disputed")
 RESOLUTIONS = ("resolved", "open", "withdrawn")
 
+# Explanations must say something: an empty or blank string is rejected. This forces a
+# reason to be given, not that the reason is true; that is still for the other side to check.
+TEXT = {"type": "string", "minLength": 1, "pattern": "\\S"}
+REQUIRED_TEXT = ("evidence", "problem")
+
 FINDING_SCHEMA = {"type": "object", "properties": {
     "severity": {"type": "string", "enum": list(SEVERITIES)},
     "file": {"type": "string"}, "line": {"type": "integer", "minimum": 0},
-    "problem": {"type": "string"}, "evidence": {"type": "string"},
+    "problem": TEXT, "evidence": TEXT,
 }, "required": ["severity", "file", "line", "problem", "evidence"], "additionalProperties": False}
 
 RESPONSE_SCHEMA = {"type": "object", "properties": {
     "id": {"type": "string"}, "action": {"type": "string", "enum": list(CODER_ACTIONS)},
-    "evidence": {"type": "string"},
+    "evidence": TEXT,
 }, "required": ["id", "action", "evidence"], "additionalProperties": False}
 
 # A first-pass finding the reviewer takes back in its second pass (retracted, or a duplicate
 # of an earlier finding). Anything not listed here is kept: omission never drops a finding.
 DROPPED_SCHEMA = {"type": "object", "properties": {
-    "id": {"type": "string"}, "evidence": {"type": "string"},
+    "id": {"type": "string"}, "evidence": TEXT,
 }, "required": ["id", "evidence"], "additionalProperties": False}
 
 RESOLUTION_SCHEMA = {"type": "object", "properties": {
     "id": {"type": "string"}, "status": {"type": "string", "enum": list(RESOLUTIONS)},
-    "evidence": {"type": "string"},
+    "evidence": TEXT,
 }, "required": ["id", "status", "evidence"], "additionalProperties": False}
 
 MAX_NOTES = 4000
@@ -88,6 +93,8 @@ def _check_object(value, schema, label):
                 raise ValueError(f"{label}.{name} must be a non-negative integer")
         elif not isinstance(item, str) or ("enum" in spec and item not in spec["enum"]):
             raise ValueError(f"{label}.{name} is invalid")
+        elif name in REQUIRED_TEXT and not item.strip():
+            raise ValueError(f"{label}.{name} must explain itself; it cannot be empty")
 
 
 def validate_finish(role, args):

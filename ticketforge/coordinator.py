@@ -418,10 +418,28 @@ class Coordinator:
         Lessons are only kept for merged work, and only the ones a human approved on Jira,
         because whatever is in the guide is read by every future agent run."""
         self.store.merged(key, sha, url)
+        self.try_save_lessons(key)
+
+    def try_save_lessons(self, key):
+        """Save pending lessons, backing off after failures (1 min, doubling, at most 1 h).
+
+        Jira is told once; only the first failure logs a full trace, so a full disk is not made
+        worse by a flood of logs. The approved lessons stay in the database until saved."""
+        data = self.store.get(key)["data"]
+        if data.get("lessons_retry_at", 0) > time.time():
+            return
         try:
             self.save_pending_lessons(self.store.get(key))
-        except OSError:
-            log.exception("Could not save lessons for %s; will retry", key)
+        except OSError as exc:
+            failures = data.get("lessons_failures", 0) + 1
+            delay = min(3600, 60 * 2 ** (failures - 1))
+            self.store.annotate(key, lessons_failures=failures, lessons_retry_at=time.time() + delay)
+            if failures == 1:
+                log.exception("Could not save lessons for %s; retrying with back-off", key)
+                self.post(key, "lessons-failed", "Could not save the approved notes to the project guide "
+                          f"({type(exc).__name__}). They are kept and will be retried automatically.")
+            else:
+                log.warning("Saving lessons for %s still failing (%s); next try in %d s", key, exc, delay)
 
     def save_pending_lessons(self, ticket):
         """Write a merged ticket's approved lessons to the project guide, once.
@@ -439,6 +457,25 @@ class Coordinator:
         save_lessons(Path(self.cfg.project_guide), key, approved)
         self.store.annotate(key, lessons_saved=True)
         self.post(key, "lessons", f"Saved {len(approved)} note(s) to the project guide; future tickets will read them.")
+
+    def watch_failed(self, ticket, exc):
+        """A check on an unassigned ticket's PR failed: wait longer each time and keep watching.
+        Never blocks the ticket, because that would allow coding.
+
+        Our own back-off doubles each time and is capped at an hour, but a wait the server
+        asked for (Retry-After) is always respected in full, even if it is longer than that."""
+        key, version = ticket["key"], ticket["version"]
+        try:
+            retries = self.store.get(key)["data"].get("remote_retries", 0) + 1
+            ours = min(3600, self.cfg.status_poll_seconds * 2 ** (retries - 1))
+            server = exc.retry_after if isinstance(exc, RateLimited) else 0
+            delay = max(server, ours)
+            # Tell Jira once per version, not on every failure.
+            notice = (f"watch-failing:{version}", f"Checking the PR on GitHub is failing ({exc}). "
+                      "Still watching for merge or close, at longer intervals.") if retries == 1 else None
+            self.store.note_watch_failure(key, version, notice, retry_at=time.time() + delay, remote_retries=retries)
+        except Superseded:
+            pass  # reassigned (or finished) meanwhile; the new state takes over
 
     def observe_pr(self, ticket):
         """Watch the PR of a ticket the agent no longer works on (unassigned): only detect merge
@@ -512,10 +549,7 @@ class Coordinator:
         # Finish any lesson saving that failed earlier (for example, the disk was full).
         for ticket in self.store.all():
             if ticket["state"] == "merged" and ticket["data"].get("lessons_approved") and not ticket["data"].get("lessons_saved"):
-                try:
-                    self.save_pending_lessons(ticket)
-                except OSError:
-                    log.exception("Could not save lessons for %s; will retry", ticket["key"])
+                self.try_save_lessons(ticket["key"])
         chosen = self.next_ticket(self.store.all())
         if chosen:
             # Remember the choice, so after a restart the worker continues the same ticket.
@@ -557,6 +591,9 @@ class Coordinator:
         except Superseded:
             log.info("Task %s superseded or stopped", key)
         except RemoteError as exc:
+            if ticket["state"] == "unassigned":
+                self.watch_failed(ticket, exc)
+                return
             try:
                 retries = self.store.get(key)["data"].get("remote_retries", 0) + 1
                 delay = (exc.retry_after * 2 ** (retries - 1)

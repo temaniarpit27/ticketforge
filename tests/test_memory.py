@@ -127,8 +127,9 @@ class LessonTests(Base):
         self.merge()
         self.assertIn("set project_guide", self.posts())
 
-    def test_failed_lesson_write_is_retried_after_merge(self):
-        # From the external review: a write failure after merge was never retried.
+    def test_failed_lesson_write_is_retried_with_back_off(self):
+        # Reviews: a failed write was first never retried, then retried every second.
+        import time as clock
         from unittest.mock import patch
         import ticketforge.coordinator as coordinator
         self.propose_lessons()
@@ -136,14 +137,29 @@ class LessonTests(Base):
         self.c.tick()
         self.say("/forge learn 1")
         real = coordinator.save_lessons
-        with patch.object(coordinator, "save_lessons", side_effect=OSError("disk full")):
+        with patch.object(coordinator, "save_lessons", side_effect=OSError("disk full")) as failing:
             self.merge()
-        self.assertEqual(self.c.store.get(KEY)["state"], "merged")
-        self.assertNotIn(LESSONS[0], self.guide.read_text())
-        with patch.object(coordinator, "save_lessons", side_effect=real) as saver:
+            for _ in range(5):
+                self.c.tick()
+        self.assertEqual(failing.call_count, 1)  # the merge tick tried once; the next ticks waited
+        data = self.c.store.get(KEY)["data"]
+        self.assertEqual(data["lessons_failures"], 1)
+        self.assertEqual(data["lessons_approved"], [LESSONS[0]])  # kept for later
+        self.assertEqual(self.posts().count("Could not save the approved notes"), 1)
+        later = clock.time() + 61
+        with patch("ticketforge.coordinator.time.time", return_value=later), \
+             patch.object(coordinator, "save_lessons", side_effect=OSError("disk full")) as failing:
             self.c.tick()
             self.c.tick()
-        self.assertEqual(saver.call_count, 1)  # retried once, then recorded as done
+        self.assertEqual(failing.call_count, 1)
+        self.assertEqual(self.c.store.get(KEY)["data"]["lessons_failures"], 2)
+        self.assertGreaterEqual(self.c.store.get(KEY)["data"]["lessons_retry_at"], later + 120)  # doubled
+        self.assertEqual(self.posts().count("Could not save the approved notes"), 1)  # told once
+        with patch("ticketforge.coordinator.time.time", return_value=later + 121), \
+             patch.object(coordinator, "save_lessons", side_effect=real) as saver:
+            self.c.tick()
+            self.c.tick()
+        self.assertEqual(saver.call_count, 1)
         self.assertEqual(self.guide.read_text().count(LESSONS[0]), 1)
         self.assertTrue(self.c.store.get(KEY)["data"]["lessons_saved"])
 

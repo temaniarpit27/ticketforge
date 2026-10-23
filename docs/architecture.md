@@ -47,8 +47,10 @@ coordinator records the spec each coding and review round used (`worked_specific
 can drop obsolete work and withdraw findings that no longer apply.
 
 An unassigned ticket with an open PR is still observed (`observe_pr`): merge or close is
-recorded, nothing else. Back-off (`retry_at`) applies to PR checks as well as coding work.
-Approved lessons are saved by a retryable, repeat-safe job (`save_pending_lessons`).
+recorded, nothing else. Its check failures are saved with `Store.note_watch_failure`, which
+checks the version but never changes the state, so the back-off can never re-enable coding.
+Back-off (`retry_at`) applies to PR checks as well as coding work. Approved lessons are
+saved by a retryable, repeat-safe job (`try_save_lessons`) that backs off after failures.
 
 Unassigning stops any agent state (`ready` through `blocked`) and bumps the version so an
 in-flight model run is discarded. An open PR (`awaiting_approval`) keeps being tracked.

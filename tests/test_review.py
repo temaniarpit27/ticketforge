@@ -32,6 +32,24 @@ class ValidationTests(unittest.TestCase):
             with self.subTest(name), self.assertRaisesRegex(ValueError, message):
                 review.validate_finish("reviewer", args)
 
+    def test_explanations_cannot_be_blank(self):
+        # Second review: a blocking finding could be dropped with evidence "".
+        for blank in ("", "   ", "\n\t"):
+            cases = [
+                ("dropped", reviewer("pass", dropped=[{"id": "N1", "evidence": blank}])),
+                ("resolution", reviewer("pass", resolutions=[{"id": "F1", "status": "withdrawn", "evidence": blank}])),
+                ("finding_evidence", reviewer("changes_requested", [{**finding(), "evidence": blank}])),
+                ("finding_problem", reviewer("changes_requested", [{**finding(), "problem": blank}])),
+            ]
+            for name, args in cases:
+                with self.subTest(name, blank=blank), self.assertRaisesRegex(ValueError, "cannot be empty"):
+                    review.validate_finish("reviewer", args)
+            coder = {"status": "ready", "summary": "s", "questions": [], "notes": "", "lessons": [],
+                     "responses": [{"id": "F1", "action": "disputed", "evidence": blank}]}
+            with self.subTest("coder_response", blank=blank), self.assertRaisesRegex(ValueError, "cannot be empty"):
+                review.validate_finish("coder", coder)
+        self.assertEqual(review.DROPPED_SCHEMA["properties"]["evidence"]["minLength"], 1)
+
     def test_valid_results_pass(self):
         review.validate_finish("reviewer", reviewer("pass", [finding("advisory")]))
         review.validate_finish("reviewer", reviewer("changes_requested", [finding()]))

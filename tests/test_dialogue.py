@@ -346,6 +346,99 @@ class UnassignedPrTests(Base):
         self.assertIn("closed without merging", self.posts())
 
 
+class UnassignedWatchFailureTests(Base):
+    """Second review: an unassigned ticket's PR watcher must save its back-off without
+    becoming eligible for coding again."""
+
+    def setUp(self):
+        super().setUp()
+        self.start("Use a threshold of 150.")
+        self.c.tick()
+        # The review's scenario: PR raised, ticket unassigned, then a new comment arrives.
+        self.c.jira.assigned = False
+        self.c.jira.say("Also handle free shipping for members.")
+        self.c.poll()
+        self.assertEqual(self.state(), "unassigned")
+        self.c.status_schedule.clear()
+        self.calls = 0
+
+    def failing(self, error):
+        def observe(ticket):
+            self.calls += 1
+            raise error
+        self.c.observe_pr = observe
+
+    def tick_at(self, wall, mono):
+        from unittest.mock import patch
+        with patch("ticketforge.coordinator.time.time", return_value=wall), \
+             patch("ticketforge.coordinator.time.monotonic", return_value=mono):
+            self.c.tick()
+
+    def test_rate_limit_back_off_is_saved_and_honoured(self):
+        from ticketforge.integrations import RateLimited
+        self.failing(RateLimited(600))
+        self.tick_at(1000, 0)
+        data = self.c.store.get(KEY)["data"]
+        self.assertEqual((data["remote_retries"], data["retry_at"]), (1, 1600))
+        self.tick_at(1121, 1121)  # the review's reproduction: too early
+        self.assertEqual(self.calls, 1)
+        self.tick_at(1601, 1601)
+        self.assertEqual(self.calls, 2)
+        self.assertEqual(self.state(), "unassigned")  # never re-enabled for coding
+        self.assertEqual(self.c.agents.calls[-1]["role"], "reviewer")  # no new agent work
+
+    def test_server_delay_longer_than_an_hour_is_respected(self):
+        # Third review: a server asking for 7,200 s was retried after 3,600 s.
+        from ticketforge.integrations import RateLimited
+        self.failing(RateLimited(7200))
+        self.tick_at(1000, 0)
+        self.assertEqual(self.c.store.get(KEY)["data"]["retry_at"], 1000 + 7200)
+        self.tick_at(1000 + 3601, 3601)
+        self.assertEqual(self.calls, 1)
+        self.tick_at(1000 + 7201, 7201)
+        self.assertEqual(self.calls, 2)
+
+    def test_ordinary_failures_back_off_longer_and_never_block(self):
+        from ticketforge.integrations import RemoteError
+        self.failing(RemoteError("GitHub down"))
+        every = self.c.cfg.status_poll_seconds
+        moment = 1000
+        for attempt in range(1, self.c.cfg.max_remote_retries + 3):
+            self.c.status_schedule.clear()
+            self.tick_at(moment, moment)
+            data = self.c.store.get(KEY)["data"]
+            self.assertEqual(data["remote_retries"], attempt)
+            self.assertEqual(data["retry_at"], moment + min(3600, every * 2 ** (attempt - 1)))
+            moment = data["retry_at"] + 1
+        self.assertEqual(self.state(), "unassigned")
+        self.assertEqual(self.posts().count("Checking the PR on GitHub is failing"), 1)
+
+    def test_success_clears_the_back_off_and_restart_keeps_it(self):
+        from ticketforge.integrations import RateLimited
+        self.failing(RateLimited(600))
+        self.tick_at(1000, 0)
+        self.c.status_schedule.clear()  # restart: nothing scheduled in memory
+        self.tick_at(1100, 1100)
+        self.assertEqual(self.calls, 1)  # the saved deadline still holds
+        del self.c.observe_pr  # back to the real watcher
+        self.tick_at(1601, 1601)
+        data = self.c.store.get(KEY)["data"]
+        self.assertEqual((data["remote_retries"], data["retry_at"]), (0, 0))
+
+    def test_reassignment_during_a_failing_check_wins(self):
+        from ticketforge.integrations import RemoteError
+
+        def observe(ticket):
+            self.c.jira.assigned = True
+            self.c.sync_one(KEY)  # reassigned while the check was running
+            raise RemoteError("GitHub down")
+        self.c.observe_pr = observe
+        self.tick_at(1000, 0)
+        ticket = self.c.store.get(KEY)
+        self.assertNotEqual(ticket["state"], "unassigned")
+        self.assertFalse(ticket["data"].get("remote_retries"))
+
+
 class RequirementChangeTests(Base):
     def calls(self, role):
         return [c for c in self.c.agents.calls if c["role"] == role]

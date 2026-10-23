@@ -275,6 +275,22 @@ class Store:
             if t["version"] != data.get("reviewed_version"):
                 self._post(db, key, "input-during-merge", "New input arrived at the merge boundary. It was not included in the merged review. Please create a follow-up ticket; the completed merge cannot be retroactively changed.")
 
+    def note_watch_failure(self, key, version, notice=None, **changes):
+        """Save retry bookkeeping for a PR that is only being watched (unassigned ticket).
+
+        Checks the version (a reassignment meanwhile wins) but never changes the state, so
+        recording a polling deadline can never make the ticket eligible for coding again."""
+        with self.transaction() as db:
+            ticket = self.get(key)
+            if ticket["version"] != version or ticket["state"] != "unassigned":
+                raise Superseded(key)
+            data = ticket["data"]
+            data.update(changes)
+            db.execute("UPDATE tickets SET data=? WHERE key=? AND version=?", (json.dumps(data), key, version))
+            self._event(db, key, "watch-failure", {"version": version, "fields": list(changes)})
+            if notice:
+                self._post(db, key, notice[0], notice[1])
+
     def finish(self, key, state):
         """Move a ticket the agent no longer works on to merged/closed, without a version check."""
         if state not in ("merged", "closed"):
