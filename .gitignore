@@ -1,0 +1,10 @@
+.env
+config.json
+.ticketforge/
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+build/
+dist/
+profiles/

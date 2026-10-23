@@ -1,0 +1,7 @@
+# Minimal Go reference image. Prefer `ticketforge init` for a repository-specific
+# image that matches go.mod and preloads dependencies before networking is disabled.
+ARG GO_VERSION=1
+FROM golang:${GO_VERSION}
+ENV GOCACHE=/tmp/go-build GOPATH=/tmp/gopath GOTOOLCHAIN=local GOFLAGS=-mod=readonly
+WORKDIR /workspace
+CMD ["sh"]
