@@ -1,4 +1,12 @@
 .env
+.env.*
+!.env.example
+!**/.env.example
+.DS_Store
+*.pem
+*.key
+.secrets/
+.local/
 config.json
 .ticketforge/
 __pycache__/

@@ -1,7 +1,8 @@
 # TicketForge: landscape, deployment, and implementation review
 
-Reviewed on 23 October 2026 against commit `bd2e13e`. This is an assessment and proposed
-improvement sequence; the runtime fixes below have not been implemented by this review.
+Historical review on 23 October 2026 against commit `bd2e13e`. The table describes that
+version, not the current implementation. See [release-readiness.md](release-readiness.md)
+for the current fix/verification status and remaining limitations.
 
 ## Where the agent runs
 
@@ -153,6 +154,5 @@ for running those systems in our environment.
 5. **Evaluate adoption before expanding:** compare a current existing product/engine on the
    same tasks. Add another language or remote execution only after the Go pilot has evidence.
 
-The first two steps address implementation defects, not differentiation. Product claims
-should wait for the pilot and comparative evaluation described in
-[differentiation-and-interview.md](differentiation-and-interview.md).
+The first two steps address implementation defects. Product claims should wait for a real
+pilot and comparative evaluation; this project is currently a learning prototype.

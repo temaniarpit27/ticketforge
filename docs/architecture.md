@@ -1,94 +1,84 @@
 # Architecture
 
-## State machine
+## Lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ready: issue matches configured JQL
-    ready --> coding
-    coding --> waiting_input: material question
-    waiting_input --> ready: authorized Jira input
-    coding --> ready: verification failure
-    coding --> reviewing: checks pass and commit saved
-    reviewing --> waiting_input: unresolved requirement
-    reviewing --> ready: evidenced findings
-    reviewing --> publishing: no actionable findings
-    publishing --> awaiting_approval: PR created or updated
+    [*] --> ready: matching issue
+    ready --> assessing: new specification
+    assessing --> waiting_input: material question
+    assessing --> coding: actionable plan
+    waiting_input --> ready: authorized input
+    coding --> waiting_input: later question
+    coding --> ready: failed checks within repair budget
+    coding --> reviewing: checks pass, commit saved
+    reviewing --> waiting_input: material ambiguity
+    reviewing --> ready: evidenced defects within review budget
+    reviewing --> publishing: pass
+    publishing --> awaiting_approval: PR linked on Jira
     awaiting_approval --> ready: new requirements
-    awaiting_approval --> merging: exact approval and checks
-    merging --> merged: remote merge confirmed
     awaiting_approval --> merged: human merges on GitHub
-    awaiting_approval --> closed: PR closed
-    coding --> blocked: infrastructure failure or budget
-    reviewing --> blocked: infrastructure failure or budget
-    blocked --> ready: new input or explicit retry
-    ready --> paused: pause command
-    coding --> paused: pause command
-    reviewing --> paused: pause command
-    paused --> ready: resume command
+    awaiting_approval --> closed: human closes PR
+    coding --> blocked: exhausted budget or prerequisite
+    reviewing --> blocked: exhausted budget or prerequisite
+    blocked --> ready: guidance or retry
+    ready --> paused: pause
+    paused --> ready: resume
 ```
 
-New authorized input can invalidate any nonterminal stage. Every tool boundary checks the
-persisted version. Before publication and merging, the coordinator also fetches Jira again.
-Source comments, versioned specifications, and workflow transitions are stored independently
-of model context. There is one worker and an independent Jira polling/outbox thread.
+`awaiting_approval` is the persisted human-waiting state, not a Jira approval gate.
+The code host exposes no merge method. Only a human approves/merges through GitHub.
 
-## Modules
+New authorized input can supersede any active stage. SQLite retains canonical specifications
+independently of model context. Tool boundaries check versions; publication also refreshes
+Jira. One worker coordinates coding and a background poll/outbox thread accepts input.
+There is no mandatory human plan-approval gate: actionable assessment proceeds to coding.
+
+## Components
 
 | Module | Responsibility |
 |---|---|
-| `config.py` | Configuration validation and literal credential-file loading |
-| `store.py` | SQLite state, version checks, audit events, durable comment outbox |
-| `integrations.py` | Jira Cloud and GitHub APIs, pagination, reconciliation |
-| `runtime.py` | Git workspaces, Docker command execution, model tool loop |
-| `project.py` | Go discovery, bounded context, reusable repository profiles and images |
-| `coordinator.py` | Agent sequencing, clarification, repairs, PR and merge policy |
-| `cli.py` | Foreground service, local diagnosis, process lock and shutdown |
-| `demo.py` | Scripted offline actors exercising the same coordinator |
+| config | Local profile validation, literal environment loading |
+| store | Versioned specifications, transactions, events, durable outbox |
+| integrations | Jira/GitHub APIs, pagination, retries, write reconciliation |
+| adapters | Explicit tracker, code-host and language contracts/registries |
+| runtime | Host Git, container execution, Anthropic tool loop |
+| context | Bounded message views and archived observation references |
+| project | Go manifest/guides/skill discovery and external profile generation |
+| coordinator | Assessment, coding, verification, review, PR handoff and status |
+| cli | Foreground service, local checks, process lock |
+| demo | Scripted actors driving the real coordinator with local Git |
 
-## Authority boundaries
+## Authority and execution
 
-- The model proposes shell operations or a structured finish result.
-- The sandbox executes only within a container and has no Jira/GitHub/model credentials.
-- The coordinator exclusively owns host Git commits/pushes and service integrations.
-- The reviewer can experiment in a fresh clone, but never mutate the coder's checkout.
-- Jira account allowlists determine whose comments can instruct or approve.
-- GitHub enforces remote branch rules and an exact-head SHA merge condition.
+The host holds credentials, talks to model/service APIs, and owns commits/pushes.
+Tools execute in short-lived containers with no network, credentials, writable root,
+or writable Git metadata. Assessment additionally mounts source read-only.
+Coder/reviewer use separate checkouts; coder, assessor, verifier, and reviewer caches
+are keyed by role, workspace, and image name. Image tags should be rebuilt/rotated deliberately.
+Review experiments never become implementation.
 
-The target repository's instruction files are task guidance, not authority to bypass runtime
-policy. Configured verification commands are operator-controlled. A reviewer verdict is
-evidence, not merge permission. A human approval is an explicit action tied to current code.
+Repository instructions are untrusted guidance, not permission to register host plugins,
+bypass protected paths, or change authority. Jira account allowlists control comment input.
+GitHub branch rules control human merging. Different sessions/models cannot prove unbiased review.
 
-## Recovery
+## Context and recovery
 
-SQLite transactions update task state and the corresponding outgoing message together where
-required; the dispatcher reconciles bot-owned comment markers before delivery. A service
-restart resets incomplete stages to runnable state and reconciles Jira before proceeding.
-Existing ticket branches and PR heads are reused; GitHub PR creation reconciles by branch.
-An uncertain merge remains in reconciliation rather than being treated as an implementation
-failure. If GitHub already merged, that remote fact wins over newly arriving requirements.
+The first task message remains canonical; oversized tasks fail explicitly. Older verbose
+tool results become observation references, then whole old exchanges can be removed from
+the model view while preserving tool-call/result pairing. A session tool reads archived
+bounded observations in chunks. Traces retain evidence, but are not resumable provider sessions.
 
-Full cross-system exactly-once processing is not claimed. A single-process lock prevents
-two local dispatchers from sending the same outbox entry concurrently. Non-idempotent remote
-operations are reconciled through stable identifiers wherever the remote API permits.
+SQLite state/message transactions and bot-owned comment markers support restart and lost-response
+reconciliation. Incomplete assessment/coding/review/publication stages become runnable.
+PR creation checks the known branch before creating another PR; an existing merged/closed PR
+is authoritative. No merge write needs reconciliation because TicketForge never makes one.
+Legacy persisted merging states recover to human waiting.
 
-## Extensions worth adding after the first real repository pilot
+GET retries are bounded and cancellable during backoff. Model inference requests may retry
+transient failures before tool execution and can incur duplicate inference charges.
+Other writes are not blindly retried. Coordinator remote failures defer saved work and
+eventually block after the retry budget; outbox delivery remains queued on failure.
+No cross-service atomicity or distributed exactly-once guarantee is claimed.
 
-1. A representative ticket evaluation set for the first Go repository and its generated sandbox image.
-2. Richer acceptance-criteria extraction with explicit provenance and test mapping.
-3. Jira attachment/document retrieval with access checks if real tickets require it.
-4. GitHub App authentication and separate merge identity for organization deployment.
-5. Webhook ingestion and reconciliation polling if 15-second polling becomes insufficient.
-6. A tested language-adapter interface for a second language, then Go workspace support.
-7. Durable scheduling with per-ticket leases only when multiple workers are needed.
-
-Do not add more agent roles or a vector database without an observed need.
-
-## Primary references
-
-- Jira enhanced JQL search: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/
-- Jira comments: https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-comments/
-- GitHub pull requests and merge SHA: https://docs.github.com/en/rest/pulls/pulls
-- GitHub branch rules: https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches
-- Anthropic tool results: https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls
-- Agent Skills: https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills
+See [current verification and limitations](release-readiness.md) and [extension contracts](extending.md).
