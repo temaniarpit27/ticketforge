@@ -9,6 +9,9 @@ surrounding code. Reconstruct intended behavior from the specification independe
 Check requirement coverage, errors, retries, cancellation, concurrency, access control,
 compatibility, and the relevance of tests where applicable. Run focused checks when useful.
 Any edits you make are disposable review experiments and never become the implementation.
+For Go changes, inspect error propagation, context cancellation, goroutine lifetimes,
+shared state, resource ownership, and compatibility when relevant to the diff. Check
+formatting and appropriate build/test evidence without demanding unrelated refactors.
 
 For each actionable finding include severity, file and line, triggering conditions, failure,
 and evidence or a reproducible check. Do not demand changes based only on style preferences.

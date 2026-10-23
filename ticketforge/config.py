@@ -16,6 +16,13 @@ class Config:
     github_repo: str
     coder_model: str
     reviewer_model: str
+    issue_tracker: str = "jira"
+    code_host: str = "github"
+    language: str = "go"
+    tracker_options: dict = field(default_factory=dict)
+    code_host_options: dict = field(default_factory=dict)
+    commit_author_name: str = ""
+    commit_author_email: str = ""
     state_dir: str = ".ticketforge"
     project_guide: str = ""
     base_branch: str = "main"
@@ -25,11 +32,17 @@ class Config:
     protected_paths: list[str] = field(default_factory=lambda: [".github/workflows", ".gitmodules", ".env", ".env.*"])
     auto_merge: bool = False
     poll_seconds: int = 15
+    status_poll_seconds: int = 30
     max_agent_steps: int = 30
     max_review_rounds: int = 3
+    max_verification_repairs: int = 3
     max_input_chars: int = 180000
     max_output_tokens: int = 6000
-    command_timeout: int = 120
+    command_timeout: int = 300
+    sandbox_file_size_mb: int = 1024
+    sandbox_tmp_mb: int = 1024
+    http_max_attempts: int = 3
+    max_remote_retries: int = 3
 
     @classmethod
     def load(cls, path: str) -> Config:
@@ -50,18 +63,22 @@ class Config:
         if not self.jira_url.startswith("https://"):
             raise ValueError("jira_url must use HTTPS")
         if not self.allowed_jira_accounts:
-            raise ValueError("Set allowed_jira_accounts to the humans allowed to instruct and approve")
+            raise ValueError("Set allowed_jira_accounts to the humans allowed to instruct the agent")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", self.github_repo):
             raise ValueError("github_repo must be owner/repository")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./-]*", self.base_branch) or ".." in self.base_branch:
             raise ValueError("Invalid base_branch")
         if not self.verification_commands:
             raise ValueError("Configure at least one meaningful verification command")
-        if self.auto_merge and not self.required_checks:
-            raise ValueError("auto_merge requires explicitly named required_checks")
-        if min(self.poll_seconds, self.max_agent_steps, self.max_review_rounds,
-               self.command_timeout, self.max_input_chars, self.max_output_tokens) < 1:
+        if self.auto_merge:
+            raise ValueError("Automatic merging is unsupported: review and merge manually on GitHub")
+        if min(self.poll_seconds, self.status_poll_seconds, self.max_agent_steps, self.max_review_rounds,
+               self.max_verification_repairs, self.command_timeout, self.max_input_chars,
+               self.max_output_tokens, self.sandbox_file_size_mb, self.sandbox_tmp_mb, self.http_max_attempts,
+               self.max_remote_retries) < 1:
             raise ValueError("Limits must be positive")
+        if self.max_input_chars < 4096:
+            raise ValueError("max_input_chars must leave at least 4096 characters for task and tool context")
         if not self.coder_model or not self.reviewer_model:
             raise ValueError("Both model IDs are required")
         if self.project_guide and not Path(self.project_guide).is_file():

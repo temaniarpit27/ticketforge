@@ -83,7 +83,7 @@ class Store:
             elif json.dumps(old["snapshot"], sort_keys=True) != encoded:
                 version = old["version"] + 1
                 data = old["data"]
-                data.update(approval=None, review=None, round=0)
+                data.update(approval=None, review=None, round=0, review_round=0, verification_repairs=0, retry_at=0, remote_retries=0)
                 state = old["state"] if old["state"] in ("paused", "merged", "closed") else "ready"
                 db.execute("UPDATE tickets SET version=?, snapshot=?, state=?, data=? WHERE key=?",
                            (version, encoded, state, json.dumps(data), key))
@@ -109,21 +109,14 @@ class Store:
                 if command in ("pause", "resume", "retry") and state not in ("merged", "closed"):
                     version += 1
                     state = "paused" if command == "pause" else "ready"
-                    data.update(approval=None, review=None, round=0)
+                    data.update(approval=None, review=None, round=0, review_round=0, verification_repairs=0, retry_at=0, remote_retries=0)
                     db.execute("UPDATE tickets SET version=?,state=?,data=? WHERE key=?",
                                (version, state, json.dumps(data), key))
                     self._post(db, key, f"command:{cid}:{digest}", f"Command applied: {command}. Current state: {state}.")
-                elif command.startswith("approve "):
-                    sha = command.split(" ", 1)[1].strip()
-                    if state == "awaiting_approval" and re.fullmatch(r"[0-9a-f]{40}", sha) and sha == data.get("head"):
-                        data["approval"] = {"sha": sha, "version": version, "account": comment["author"]}
-                        db.execute("UPDATE tickets SET data=? WHERE key=?", (json.dumps(data), key))
-                        msg = f"Approval recorded for {sha} and specification v{version}. Merge still requires configured checks and repository rules."
-                    else:
-                        msg = "Approval rejected: use /forge approve FULL_COMMIT_SHA for the current PR after agent review is complete."
-                    self._post(db, key, f"command:{cid}:{digest}", msg)
+                elif command.startswith("note "):
+                    self._post(db, key, f"command:{cid}:{digest}", "Note recorded. No new implementation requested.")
                 else:
-                    self._post(db, key, f"command:{cid}:{digest}", "Commands: /forge pause, /forge resume, /forge retry, /forge approve FULL_COMMIT_SHA. Write requirements and answers as ordinary comments.")
+                    self._post(db, key, f"command:{cid}:{digest}", "Commands: /forge pause, /forge resume, /forge retry, /forge note TEXT. Approve and merge on GitHub. Write requirements and answers as ordinary comments.")
                 self._event(db, key, "command", {"command": command, "comment": cid})
 
     def guard(self, key, version):
@@ -156,7 +149,7 @@ class Store:
         """Single-process startup: restart incomplete stages from persisted workspaces."""
         with self.transaction() as db:
             for t in self.all():
-                if t["state"] in ("coding", "reviewing", "publishing", "merging"):
+                if t["state"] in ("assessing", "coding", "reviewing", "publishing", "merging"):
                     state = "awaiting_approval" if t["state"] == "merging" else "ready"
                     db.execute("UPDATE tickets SET state=? WHERE key=?", (state, t["key"]))
                     self._post(db, t["key"], f"recovery:{time.time_ns()}", "Service restarted. Reconciling saved work and external state before continuing.")

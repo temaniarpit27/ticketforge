@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .store import Store, Superseded
+from .integrations import RateLimited, RemoteError
 
 log = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ log = logging.getLogger(__name__)
 class Coordinator:
     def __init__(self, cfg, store: Store, jira, github, repo, agents, sandbox):
         self.cfg, self.store, self.jira, self.github = cfg, store, jira, github
+        self.tracker, self.code_host = jira, github
         self.repo, self.agents, self.sandbox = repo, agents, sandbox
         self.stop = threading.Event()
         self.sync_lock = threading.RLock()
@@ -87,11 +89,12 @@ class Coordinator:
                 self.store.update(key, version, "closed", approval=None)
                 self.post(key, f"closed:{remote['number']}", "The PR is closed. Create a follow-up ticket for further changes.")
                 return
+        review_round = ticket["data"].get("review_round", 0)
         round_number = ticket["data"].get("round", 0) + 1
-        if round_number > self.cfg.max_review_rounds:
+        if review_round >= self.cfg.max_review_rounds:
             self.store.update(key, version, "blocked", notice=(f"round-limit:{version}", "Coding/review limit reached. Please inspect the findings. Add guidance here or use /forge retry after resolving the blocker."))
             return
-        self.store.update(key, version, "coding", round=round_number, approval=None, notice=(f"started:{version}:{round_number}",
+        self.store.update(key, version, "assessing", round=round_number, approval=None, notice=(f"started:{version}:{round_number}",
                   f"Started work on specification v{version}, attempt {round_number}. Investigating and implementing in an isolated workspace."))
         self.flush()
         workspace, branch = self.repo.prepare(key)
@@ -106,6 +109,18 @@ class Coordinator:
                 "project_context": project_context,
                 "review_findings_or_failed_checks": ticket["data"].get("feedback", []),
                 "verification_commands": self.cfg.verification_commands}
+        if ticket["data"].get("assessed_version") != version:
+            assessment = self.agents.run("assessor", workspace, task, guard, tracer)
+            self.boundary(key, version)
+            if self.result(key, version, "assessment", assessment):
+                return
+            self.store.update(key, version, assessment=assessment, assessed_version=version,
+                              notice=(f"assessment:{version}", "Read-only assessment complete. Plan and assumptions:\n\n" +
+                                      assessment["summary"] + "\n\nYou can correct these on this ticket at any time."))
+        else:
+            assessment = ticket["data"].get("assessment")
+        task["assessment"] = assessment
+        self.store.update(key, version, "coding")
         coded = self.agents.run("coder", workspace, task, guard, tracer)
         self.boundary(key, version)
         if self.result(key, version, "coder", coded):
@@ -113,20 +128,24 @@ class Coordinator:
         verification = []
         for command in self.cfg.verification_commands:
             guard()
-            value = self.sandbox.run(workspace, command, guard)
+            value = self.sandbox.run(workspace, command, guard, role="verify")
+
             verification.append({"command": command, **value})
             tracer({"role": "coordinator", "verification": verification[-1]})
         self.boundary(key, version)
         failed = [v for v in verification if v["exit_code"] != 0]
         if failed:
-            self.store.update(key, version, "ready", feedback=failed, verification=verification,
+            repairs = ticket["data"].get("verification_repairs", 0) + 1
+            target = "blocked" if repairs > self.cfg.max_verification_repairs else "ready"
+            self.store.update(key, version, target, feedback=failed, verification=verification, verification_repairs=repairs,
                               notice=(f"checks-failed:{version}:{round_number}", "Verification failed. Returning evidence to the coder for repair:\n" +
-                      "\n".join(f"{v['command']}: exit {v['exit_code']}\n{v['output'][:2500]}" for v in failed)))
+                      "\n".join(f"{v['command']}: exit {v['exit_code']}\n{v['output'][:2500]}" for v in failed) +
+                      ("\nVerification repair budget exhausted; add guidance or /forge retry." if target == "blocked" else "")))
             return
         head, base = self.repo.commit(workspace, key, version)
         self.boundary(key, version)
         self.store.update(key, version, "reviewing", head=head, base=base, branch=branch,
-                          verification=verification, coder_result=coded, notice=(f"review-start:{version}:{head}:{round_number}",
+                          verification=verification, coder_result=coded, review_round=review_round + 1, notice=(f"review-start:{version}:{head}:{round_number}",
                           f"Implementation checks passed. Independent review started for commit {head} against specification v{version}."))
         self.flush()
         reviewer_workspace = self.repo.review_workspace(key, workspace, head, version)
@@ -150,10 +169,10 @@ class Coordinator:
         self.boundary(key, version)
         self.repo.publish(workspace, branch)
         self.boundary(key, version)
-        body = (f"Implements {key}, specification v{version}.\n\nJira: {self.cfg.jira_url.rstrip('/')}/browse/{key}\n\n"
+        body = (f"Implements {key}, specification v{version}.\n\nTicket: {self.tracker.issue_url(key)}\n\n"
                 f"Commit: {head}\n\nSummary:\n{coded['summary']}\n\n"
                 "Verification run by coordinator:\n" + "\n".join(f"- `{v['command']}`: exit {v['exit_code']}" for v in verification) +
-                f"\n\nIndependent review:\n{reviewed['summary']}\n\nHuman review is required. Discuss changes and approve on Jira.")
+                f"\n\nIndependent review:\n{reviewed['summary']}\n\nDiscuss implementation changes on Jira. Human approval and merging take place on GitHub.")
         pr = self.github.ensure_pr(branch, f"{key}: {ticket['snapshot']['summary']}"[:200], body)
         self.store.update(key, version, "awaiting_approval", pr=pr["number"], pr_url=pr["html_url"], approval=None)
         self.announce_pr(key, version)
@@ -165,8 +184,8 @@ class Coordinator:
         self.post(key, f"pr:{version}:{head}",
                   f"PR raised: {url}\n\nIndependent review completed; configured local checks passed.\n"
                   f"Specification: v{version}\nCommit: {head}\n\n{data['coder_result']['summary']}\n\n"
-                  f"Please review the diff. Request changes here, or approve this exact commit with:\n/forge approve {head}\n\n"
-                  "New input invalidates earlier approval. GitHub checks and repository rules must also pass.")
+                  "Please review and merge manually on GitHub. Request implementation changes on this ticket.\n\n"
+                  "New input requires fresh verification and agent review. TicketForge never approves or merges your PR.")
         if data.get("jira_linked") != url:
             self.jira.link(key, url)
             self.store.update(key, version, jira_linked=url)
@@ -186,7 +205,7 @@ class Coordinator:
         head = pr["head"]["sha"]
         if head != data["head"]:
             self.store.update(key, version, "blocked", approval=None)
-            self.post(key, f"unexpected-head:{version}:{head}", "The PR branch changed outside TicketForge. Automatic merge is blocked. Reconcile the branch before retrying.")
+            self.post(key, f"unexpected-head:{version}:{head}", "The PR branch changed outside TicketForge. The agent review applies to the previous commit; reconcile the branch before retrying.")
             return
         checks = self.github.checks(head)
         reviews = self.github.reviews(pr["number"])
@@ -202,59 +221,47 @@ class Coordinator:
                       ("\nNo checks reported yet." if not checks else "") +
                       "\n\nGitHub reviews:\n" + "\n".join(f"{r['author']}: {r['state']}\n{r['body']}" for r in summary["reviews"]) +
                       "\n\nPlease write implementation requests on this Jira ticket.")
-        current = self.store.get(key)["data"]
-        approval = current.get("approval")
-        if not approval or not self.cfg.auto_merge:
-            if approval and not self.cfg.auto_merge:
-                self.post(key, f"merge-disabled:{version}:{head}", "Approval is recorded. Automatic merging is disabled in configuration; merge manually or enable it after configuring required checks and repository rules.")
-            return
-        if approval.get("sha") != head or approval.get("version") != version:
-            return
-        if current.get("reviewed_head") != head or current.get("reviewed_version") != version:
-            return
-        if any(checks.get(name) != "success" for name in self.cfg.required_checks):
-            return
-        # Do not override a human change request, including one on an older commit.
-        latest_reviews = {}
-        for r in sorted(reviews, key=lambda r: r["id"]):
-            if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
-                latest_reviews[r["user"]["login"]] = r["state"]
-        if "CHANGES_REQUESTED" in latest_reviews.values() or pr.get("mergeable") is not True or pr.get("mergeable_state") != "clean":
-            self.post(key, f"merge-blocked:{version}:{head}:{digest}", "Approval recorded, but GitHub reports a review, conflict, or branch-policy blocker. Resolve it before merging.")
-            return
-        self.boundary(key, version)
-        self.store.update(key, version, "merging", notice=(f"merge-start:{version}:{head}", f"Approval and checks confirmed for {head}. Starting merge; this is the final input cut-off for this run."))
-        self.flush()
-        self.boundary(key, version)
-        result = self.github.merge(pr["number"], head)
-        # Reconcile on later polling if input arrived during the irreversible remote call.
-        self.store.merged(key, result.get("sha"), pr["html_url"])
 
     def tick(self):
         for ticket in self.store.all():
             if self.stop.is_set():
                 return
             key, version = ticket["key"], ticket["version"]
+            if ticket["data"].get("retry_at", 0) > time.time():
+                continue
             try:
                 if ticket["state"] == "ready":
                     self.work(ticket)
                     return
                 if ticket["state"] == "awaiting_approval":
-                    self.check_merge(ticket)
-                elif ticket["state"] == "merging":
-                    remote = self.github.pr(ticket["data"]["pr"])
-                    if remote.get("merged"):
-                        self.store.merged(key, remote.get("merge_commit_sha"), remote["html_url"])
-                    else:
-                        target = "awaiting_approval" if ticket["data"].get("reviewed_version") == version else "ready"
-                        self.store.update(key, version, target)
+                    # A new specification/head bypasses the old status schedule.
+                    token = (version, ticket["data"].get("head"))
+                    previous = getattr(self, "status_schedule", {}).get(key)
+                    now = time.monotonic()
+                    if previous is None or previous[0] != token or now >= previous[1]:
+                        if not hasattr(self, "status_schedule"):
+                            self.status_schedule = {}
+                        # Schedule before I/O so failures cannot create a tight retry loop.
+                        self.status_schedule[key] = (token, now + self.cfg.status_poll_seconds)
+                        self.check_merge(ticket)
             except Superseded:
                 log.info("Task %s superseded or stopped", key)
+            except RemoteError as exc:
+                try:
+                    retries = self.store.get(key)["data"].get("remote_retries", 0) + 1
+                    delay = exc.retry_after if isinstance(exc, RateLimited) else self.cfg.status_poll_seconds
+                    target = "awaiting_approval" if ticket["state"] == "awaiting_approval" else "ready"
+                    if retries > self.cfg.max_remote_retries:
+                        target = "blocked"
+                    action = "Retry budget exhausted; resolve the blocker and comment /forge retry." if target == "blocked" else "Retry scheduled."
+                    self.store.update(key, version, target, retry_at=time.time() + delay, remote_retries=retries,
+                                      notice=(f"deferred:{version}:{time.time_ns()}", f"Remote request deferred: {exc}. Saved work is retained. {action}"))
+                except Superseded:
+                    pass
             except Exception as exc:
                 log.exception("Task %s failed", key)
                 try:
-                    # An uncertain merge result must be reconciled, not blindly restarted.
-                    target = "merging" if self.store.get(key)["state"] == "merging" else "blocked"
+                    target = "blocked"
                     self.store.update(key, version, target, error=str(exc)[:2000], notice=(f"error:{version}:{time.time_ns()}",
                               f"Work stopped: {type(exc).__name__}: {str(exc)[:1500]}\nSaved work is retained. Resolve the blocker and comment /forge retry."))
                 except Superseded:
@@ -266,14 +273,20 @@ class Coordinator:
         self.poll()
         def background():
             next_poll = time.monotonic() + self.cfg.poll_seconds
+            failures = 0
             while not self.stop.wait(1):
                 try:
                     if time.monotonic() >= next_poll:
                         self.poll()
                         next_poll = time.monotonic() + self.cfg.poll_seconds
                     self.flush()
+                    failures = 0
                 except Exception:
                     log.exception("Background integration failed; durable messages remain queued")
+                    failures += 1
+                    delay = min(60, 2 ** min(failures, 6))
+                    next_poll = time.monotonic() + delay
+                    self.stop.wait(delay)
         thread = threading.Thread(target=background, name="jira-events", daemon=True)
         thread.start()
         try:

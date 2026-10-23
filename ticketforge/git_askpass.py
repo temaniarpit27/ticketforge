@@ -4,6 +4,6 @@ import os
 import sys
 
 if "username" in " ".join(sys.argv[1:]).lower():
-    print("x-access-token")
+    print(os.environ.get("TICKETFORGE_GIT_USERNAME", "x-access-token"))
 else:
-    print(os.environ.get("GITHUB_TOKEN", ""))
+    print(os.environ.get("TICKETFORGE_GIT_PASSWORD", os.environ.get("GITHUB_TOKEN", "")))

@@ -19,6 +19,9 @@ KEY = "DEMO-1"
 
 
 class DemoJira:
+    def issue_url(self, key):
+        return "https://jira.example/browse/" + key
+
     def __init__(self):
         self.description = "Implement shipping_cost(subtotal). Charge 10 below the free-shipping threshold and 0 at or above it."
         self.human = []
@@ -64,7 +67,7 @@ class DemoRepository(Repository):
 
 
 class DemoSandbox:
-    def run(self, workspace, command, guard=lambda: None):
+    def run(self, workspace, command, guard=lambda: None, *, role="coder", read_only=False):
         guard()
         # Only a fixed trusted test invocation is supported; never executes model commands.
         if command != "python -m unittest discover -s tests -v":
@@ -96,7 +99,7 @@ class DemoGitHub:
     def reviews(self, number):
         return self.review_results
 
-    def merge(self, number, sha):
+    def human_merge(self, number, sha):
         if sha != self.record["head"]["sha"]:
             raise ValueError("Head changed")
         self.merge_calls.append(sha)
@@ -116,6 +119,8 @@ class DemoAgents:
         if not notes:
             return {**result, "status": "needs_input", "questions": ["What subtotal qualifies for free shipping?"]}
         threshold = 150 if any("150" in n["text"] for n in notes) else 100
+        if role == "assessor":
+            return {**result, "status": "ready", "summary": f"Implement an inclusive threshold of {threshold}; test below, at, and above it."}
         if role == "coder":
             # First attempt deliberately has a boundary bug; independent review catches it.
             operator = ">=" if task.get("review_findings_or_failed_checks") or threshold == 150 else ">"
@@ -145,8 +150,9 @@ def fixture(root):
         "    def test_above(self): self.assertEqual(shipping_cost(200), 0)\n")
     process(["git", "init", "-b", "main", str(source)])
     cfg = Config(repo=str(source), jira_url="https://jira.example", jira_jql="project = DEMO",
+                 commit_author_name="Demo", commit_author_email="demo@example.invalid",
                  allowed_jira_accounts=["human"], github_repo="demo/repo", coder_model="scripted", reviewer_model="scripted",
-                 state_dir=str(root / "state"), auto_merge=True, required_checks=["tests"],
+                 state_dir=str(root / "state"), auto_merge=False, required_checks=["tests"],
                  verification_commands=["python -m unittest discover -s tests -v"])
     repo = DemoRepository(cfg)
     repo.git("add", ".", cwd=source)
@@ -178,18 +184,14 @@ def run_demo(parent):
         c.tick()
         ticket = c.store.get(KEY)
         assert ticket["state"] == "awaiting_approval" and ticket["data"]["head"] != old_head
-        c.jira.say("/forge approve " + old_head)
-        c.poll()
-        assert not c.store.get(KEY)["data"].get("approval")
-        c.jira.say("/forge approve " + ticket["data"]["head"])
-        c.poll()
+        c.github.human_merge(1, ticket["data"]["head"])
         c.tick()
         c.flush()
         assert c.store.get(KEY)["state"] == "merged"
         (root / "jira-transcript.json").write_text(json.dumps({"human_comments": c.jira.human,
                                                             "agent_comments": c.jira.posts,
                                                             "links": c.jira.links}, indent=2))
-        print("Offline demo passed: clarification → coding → review finding → repair → PR → new input → revised PR → stale approval rejected → approval → merge.")
+        print("Offline demo passed: clarification → coding → review finding → repair → PR → new input → revised PR → human reviews and merges → merge detected.")
         print("Actors were scripted; no Jira, GitHub, model API, or Docker calls were made.")
         print(f"Saved repository, durable state, and Jira transcript: {root}")
     finally:

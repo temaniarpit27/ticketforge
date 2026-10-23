@@ -94,6 +94,17 @@ class ProjectTests(unittest.TestCase):
         self.assertIn("ARG GO_VERSION=1.24.2", docker)
         self.assertIn("COPY go.mod go.sum ./", docker)
 
+    def test_claude_and_agent_guides_and_skills_are_discovered_without_execution(self):
+        for name in ("CLAUDE.md", "AGENT.md", "agent.md"):
+            (self.root / name).write_text("Project-specific factual guidance")
+        skill = self.root / ".claude" / "skills" / "go-testing"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: go-testing\ndescription: Test Go handlers\n---\nRead the tests before changes.\n")
+        context = inspect_project(self.root)
+        self.assertTrue({"CLAUDE.md", "AGENT.md"}.issubset({d["path"] for d in context["documents"]}))
+        self.assertEqual(context["skills"][0]["description"], "Test Go handlers")
+        self.assertNotIn("instructions", context["skills"][0])  # Loaded on demand via sandbox.
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -43,7 +43,7 @@ def inspect_project(root: Path):
         raise UnsupportedRepository("go.mod must declare a module and Go version before automatic onboarding")
     if re.search(r"=>\s+(?:\.{1,2}/|/)", text):
         raise UnsupportedRepository("Local Go module replacements need a custom build context; automatic onboarding currently supports standalone modules only")
-    docs = [value for name in ("README.md", "AGENTS.md", "TICKETFORGE.md", "CONTRIBUTING.md",
+    docs = [value for name in ("README.md", "AGENTS.md", "AGENT.md", "agent.md", "CLAUDE.md", "TICKETFORGE.md", "CONTRIBUTING.md",
                                "docs/architecture.md", "docs/ARCHITECTURE.md")
             for value in [safe_text(root, name)] if value]
     entries = []
@@ -58,12 +58,33 @@ def inspect_project(root: Path):
         if len(entries) >= 150:
             break
     warnings = []
-    if not any(d["path"] in ("AGENTS.md", "TICKETFORGE.md") for d in docs):
+    if not any(d["path"] in ("AGENTS.md", "AGENT.md", "agent.md", "CLAUDE.md", "TICKETFORGE.md") for d in docs):
         warnings.append("No dedicated project guide. Investigate source and tests; ask on Jira for material product decisions.")
     return {"language": "go", "module": module[1].strip('"'), "go_version": version[1],
             "toolchain_version": toolchain[1] if toolchain else version[1], "manifest": manifest,
-            "documents": docs, "structure": entries[:150], "warnings": warnings,
+            "documents": docs, "skills": discover_skills(root), "structure": entries[:150], "warnings": warnings,
             "policy": "Discovery is a starting map, not proof of behavior. Inspect relevant code and applicable nested instructions before editing. Missing product context must be clarified on Jira."}
+
+
+def discover_skills(root):
+    catalog = []
+    for directory in (".agents/skills", ".claude/skills"):
+        parent = root / directory
+        if not parent.is_dir() or parent.is_symlink() or root not in parent.resolve().parents:
+            continue
+        for entry in sorted(parent.iterdir(), key=lambda p: p.name):
+            if len(catalog) >= 24:
+                return catalog
+            if entry.is_symlink() or not entry.is_dir():
+                continue
+            relative = f"{directory}/{entry.name}/SKILL.md"
+            content = safe_text(root, relative, 4000)
+            if not content:
+                continue
+            description = re.search(r"(?m)^description:\s*(.+)$", content["text"])
+            catalog.append({"name": entry.name, "path": relative,
+                            "description": description[1].strip(' \"\'')[:500] if description else "Read this skill when relevant to the task."})
+    return catalog
 
 
 def go_dockerfile(context, has_sum):
@@ -110,6 +131,7 @@ def init_profile(repo: Path, directory: Path, github_repo=None):
                             capture_output=True, text=True, timeout=10)
     base_branch = result.stdout.strip().removeprefix("origin/") if result.returncode == 0 else "main"
     from .config import Config
+    from .adapters import GoAdapter
     from dataclasses import asdict
     cfg = Config(repo=str(repo), jira_url="https://your-company.atlassian.net",
                  jira_jql="project = APP AND labels = ticketforge ORDER BY created ASC",
@@ -117,7 +139,7 @@ def init_profile(repo: Path, directory: Path, github_repo=None):
                  coder_model="replace-with-your-anthropic-model-id", reviewer_model="replace-with-your-anthropic-model-id",
                  base_branch=base_branch, sandbox_image="ticketforge-" + re.sub(r"[^a-z0-9_.-]", "-", repo.name.lower()) + ":local",
                  project_guide="PROJECT.md",
-                 verification_commands=["go test ./...", "go test -race ./...", "go vet ./..."],
+                 verification_commands=GoAdapter().verification_commands(),
                  required_checks=["replace-with-your-github-ci-check-name"])
     directory.mkdir(parents=True, exist_ok=True)
     (directory / "config.json").write_text(json.dumps(asdict(cfg), indent=2) + "\n")

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import Config, load_env, secret
 from .coordinator import Coordinator
-from .integrations import GitHub, Jira
+from .adapters import create_integrations
 from .runtime import Agents, Repository, Sandbox
 from .store import Store
 
@@ -52,15 +52,16 @@ def main():
         finally:
             store.close()
         return
-    from .project import inspect_project
-    context = inspect_project(Path(cfg.repo)) if args.command == "doctor" else None
+    from .adapters import language_adapter
+    context = language_adapter(cfg.language).inspect(Path(cfg.repo)) if args.command == "doctor" else None
     for name in ("JIRA_EMAIL", "JIRA_API_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"):
         secret(name)
     sandbox = Sandbox(cfg)
-    sandbox.check()
+    probe = sandbox.check()
     if args.command == "doctor":
         print("Local configuration, credential presence, Docker engine, and sandbox image checks passed.")
         print(f"Go repository: {context['module']}; declared Go {context['go_version']}")
+        print(probe["output"].strip())
         print("Credentials and remote permissions have not been validated. No remote changes were made.")
         return
     with (root / "service.lock").open("a") as lock:
@@ -71,7 +72,8 @@ def main():
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s",
                             handlers=[logging.StreamHandler(), logging.FileHandler(root / "service.log")])
         store = Store(root / "state.sqlite3")
-        coordinator = Coordinator(cfg, store, Jira(cfg), GitHub(cfg), Repository(cfg), Agents(cfg, sandbox), sandbox)
+        tracker, code_host = create_integrations(cfg)
+        coordinator = Coordinator(cfg, store, tracker, code_host, Repository(cfg, code_host), Agents(cfg, sandbox), sandbox)
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, lambda *_: coordinator.stop.set())
         try:

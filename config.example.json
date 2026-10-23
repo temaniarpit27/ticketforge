@@ -2,7 +2,9 @@
   "repo": "/absolute/path/to/existing/target-repository",
   "jira_url": "https://your-company.atlassian.net",
   "jira_jql": "project = APP AND labels = ticketforge ORDER BY created ASC",
-  "allowed_jira_accounts": ["your-human-jira-account-id"],
+  "allowed_jira_accounts": [
+    "your-human-jira-account-id"
+  ],
   "github_repo": "your-org/your-repository",
   "base_branch": "main",
   "coder_model": "set-an-anthropic-model-id-available-to-your-account",
@@ -10,14 +12,38 @@
   "state_dir": ".ticketforge",
   "project_guide": "",
   "sandbox_image": "ticketforge-sandbox:local",
-  "verification_commands": ["go test ./...", "go test -race ./...", "go vet ./..."],
-  "required_checks": ["tests"],
-  "protected_paths": [".github/workflows", ".gitmodules", ".env", ".env.*"],
+  "verification_commands": [
+    "go test ./...",
+    "go test -race ./...",
+    "go vet ./..."
+  ],
+  "required_checks": [
+    "tests"
+  ],
+  "protected_paths": [
+    ".github/workflows",
+    ".gitmodules",
+    ".env",
+    ".env.*"
+  ],
   "auto_merge": false,
   "poll_seconds": 15,
   "max_agent_steps": 30,
   "max_review_rounds": 3,
   "max_input_chars": 180000,
   "max_output_tokens": 6000,
-  "command_timeout": 120
+  "command_timeout": 300,
+  "issue_tracker": "jira",
+  "code_host": "github",
+  "language": "go",
+  "commit_author_name": "",
+  "commit_author_email": "",
+  "tracker_options": {},
+  "code_host_options": {},
+  "status_poll_seconds": 30,
+  "max_verification_repairs": 3,
+  "http_max_attempts": 3,
+  "max_remote_retries": 3,
+  "sandbox_file_size_mb": 1024,
+  "sandbox_tmp_mb": 1024
 }

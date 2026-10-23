@@ -13,6 +13,12 @@ from ticketforge.store import Superseded
 
 
 class BoundaryTests(unittest.TestCase):
+    def sandbox(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        return Sandbox(SimpleNamespace(command_timeout=30, sandbox_image="test:local", state_dir=temp.name,
+                                       sandbox_file_size_mb=1024, sandbox_tmp_mb=1024))
+
     def test_adf_roundtrip(self):
         self.assertEqual(adf_text(to_adf("Hello\n\nQuestion?")), "Hello\n\nQuestion?\n")
 
@@ -20,7 +26,7 @@ class BoundaryTests(unittest.TestCase):
         jira = Jira.__new__(Jira)
         jira.cfg = SimpleNamespace(allowed_jira_accounts=["human"])
         jira.bot = "bot"
-        jira.http = SimpleNamespace(call=lambda *a: {"fields": {"summary": "Task", "description": to_adf("Details")}})
+        jira.http = SimpleNamespace(call=lambda *a, **kw: {"fields": {"summary": "Task", "description": to_adf("Details")}})
         jira.comments = lambda key: [{"id": str(i), "author": {"accountId": author}, "body": to_adf(body)}
                                      for i, (author, body) in enumerate([
                                          ("bot", "I am working"), ("stranger", "/forge approve " + "a" * 40),
@@ -53,8 +59,7 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(github.checks("a" * 40), {"tests": "failure", "lint": "pending"})
 
     def test_docker_has_no_network_or_service_secrets(self):
-        cfg = SimpleNamespace(command_timeout=30, sandbox_image="test:local")
-        sandbox = Sandbox(cfg)
+        sandbox = self.sandbox()
         calls = []
         def fake_process(args, **kwargs):
             calls.append((args, kwargs))
@@ -67,6 +72,9 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("--network=none", args)
         self.assertIn("--cap-drop=ALL", args)
         self.assertIn("--read-only", args)
+        self.assertIn("fsize=1073741824:1073741824", args)
+        self.assertEqual(args[-3:-1], ["sh", "-c"])
+        self.assertIn("--env=GOCACHE=/cache/go-build", args)
         self.assertTrue(any("/workspace/.git,readonly" in a for a in args))
         self.assertFalse(any("TOKEN" in a or "API_KEY" in a for a in args))
         self.assertEqual(calls[-1][0][:3], ["docker", "rm", "-f"])
@@ -78,13 +86,13 @@ class BoundaryTests(unittest.TestCase):
             load_env(path)
             self.assertEqual(os.environ["TOKEN"], "$(touch /tmp/should-never-run)")
 
-    def test_auto_merge_requires_named_checks(self):
+    def test_auto_merge_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             (Path(temp) / ".git").mkdir()
             cfg = Config(repo=temp, jira_url="https://jira.example", jira_jql="project = APP",
                          allowed_jira_accounts=["human"], github_repo="org/repo", coder_model="a", reviewer_model="b",
                          verification_commands=["test"], auto_merge=True)
-            with self.assertRaisesRegex(ValueError, "required_checks"):
+            with self.assertRaisesRegex(ValueError, "Automatic merging"):
                 cfg.validate()
 
     def test_agent_tool_result_loop_and_independent_model_selection(self):
@@ -93,9 +101,9 @@ class BoundaryTests(unittest.TestCase):
         agents = Agents.__new__(Agents)
         agents.cfg = cfg
         agents.skill_root = Path(__file__).resolve().parents[1] / "ticketforge" / "skills"
-        agents.sandbox = SimpleNamespace(run=lambda *a: {"exit_code": 0, "output": "evidence"})
+        agents.sandbox = SimpleNamespace(run=lambda *a, **kw: {"exit_code": 0, "output": "evidence"})
         requests = []
-        def call(method, path, body):
+        def call(method, path, body, **kwargs):
             requests.append(copy.deepcopy(body))
             if len(requests) == 1:
                 return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "one", "name": "shell", "input": {"command": "ls"}}]}
@@ -114,12 +122,12 @@ class BoundaryTests(unittest.TestCase):
         agents = Agents.__new__(Agents)
         agents.cfg = cfg
         agents.skill_root = Path(__file__).resolve().parents[1] / "ticketforge" / "skills"
-        agents.http = SimpleNamespace(call=lambda *a: {"stop_reason": "max_tokens", "content": []})
+        agents.http = SimpleNamespace(call=lambda *a, **kw: {"stop_reason": "max_tokens", "content": []})
         with self.assertRaises(ExecutionError):
             agents.run("coder", Path("/unused"), {}, lambda: None, lambda e: None)
 
     def test_container_cleanup_is_attempted_on_cancellation(self):
-        sandbox = Sandbox(SimpleNamespace(command_timeout=30, sandbox_image="test:local"))
+        sandbox = self.sandbox()
         calls = []
         def fake_process(args, **kwargs):
             calls.append(args)

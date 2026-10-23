@@ -11,6 +11,10 @@ description: Implement the current Jira specification with focused changes and e
 3. Implement the smallest complete solution that addresses the root cause.
 4. Add or update tests when they validate changed behavior, including material failure cases.
 5. Run the appropriate commands and inspect their exit codes and output. Report limitations.
+   For Go, format changed files, preserve error context and errors.Is/As behavior, propagate
+   cancellation, close owned resources, and check concurrency/race behavior where relevant.
+   Respect the declared toolchain and compatibility constraints. Do not blindly run tidy
+   or add dependencies unavailable in the offline image; report environment limitations.
 6. If review findings exist, reproduce or investigate each. Fix valid findings. If disputing one,
    supply concrete code or execution evidence; do not dismiss it by assertion.
 7. Return ready only when the requested change is implemented. Return blocked for unavailable

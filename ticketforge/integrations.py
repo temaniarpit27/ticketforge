@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import base64
 import json
+import random
+import time
+from email.utils import parsedate_to_datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,32 +16,73 @@ class RemoteError(Exception):
     pass
 
 
+class RateLimited(RemoteError):
+    def __init__(self, delay):
+        self.retry_after = max(1, delay)
+        super().__init__(f"Remote rate limit; retry after {self.retry_after:.0f} seconds")
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise RemoteError("Unexpected API redirect refused")
 
 
 class HTTP:
-    def __init__(self, base, headers):
+    def __init__(self, base, headers, max_attempts=3, sleeper=time.sleep):
         self.base = base.rstrip("/")
         self.headers = headers
         self.opener = urllib.request.build_opener(NoRedirect)
+        self.max_attempts, self.sleep = max_attempts, sleeper
 
-    def call(self, method, path, body=None):
+    def wait(self, delay, guard):
+        while delay > 0:
+            guard()
+            step = min(delay, 0.1)
+            self.sleep(step)
+            delay -= step
+        guard()
+
+    def call(self, method, path, body=None, *, guard=lambda: None):
         raw = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(self.base + path, raw, method=method,
                                          headers={"Content-Type": "application/json", **self.headers})
-        try:
-            with self.opener.open(request, timeout=90) as response:
-                result = response.read(8 * 1024 * 1024 + 1)
-                if len(result) > 8 * 1024 * 1024:
-                    raise RemoteError("API response exceeds size limit")
-                return json.loads(result) if result else {}
-        except urllib.error.HTTPError as exc:
-            # Do not echo upstream bodies, which may contain credentials or private data.
-            raise RemoteError(f"{method} {urllib.parse.urlsplit(path).path}: HTTP {exc.code}") from None
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise RemoteError(f"{method} {urllib.parse.urlsplit(path).path}: connection failed; outcome may be uncertain") from None
+        retryable_call = method == "GET" or (method == "POST" and self.base == "https://api.anthropic.com" and path == "/v1/messages")
+        for attempt in range(self.max_attempts if retryable_call else 1):
+            guard()
+            delay = min(30, 2 ** attempt + random.random())
+            try:
+                with self.opener.open(request, timeout=90) as response:
+                    result = response.read(8 * 1024 * 1024 + 1)
+                    if len(result) > 8 * 1024 * 1024:
+                        raise RemoteError("API response exceeds size limit")
+                    return json.loads(result) if result else {}
+            except urllib.error.HTTPError as exc:
+                retry = exc.code == 429 or 500 <= exc.code <= 599
+                headers = exc.headers or {}
+                remaining = headers.get("X-RateLimit-Remaining")
+                after = headers.get("Retry-After")
+                if after:
+                    try:
+                        delay = float(after)
+                    except ValueError:
+                        try:
+                            delay = max(1, parsedate_to_datetime(after).timestamp() - time.time())
+                        except (ValueError, TypeError, OverflowError):
+                            pass
+                if remaining == "0":
+                    try:
+                        delay = max(delay, float(headers.get("X-RateLimit-Reset", "0")) - time.time())
+                    except ValueError:
+                        pass
+                    raise RateLimited(max(delay, 1)) from None
+                if delay > 30 and retry:
+                    raise RateLimited(delay) from None
+                if not retryable_call or not retry or attempt + 1 >= self.max_attempts:
+                    raise RemoteError(f"{method} {urllib.parse.urlsplit(path).path}: HTTP {exc.code}") from None
+            except (urllib.error.URLError, TimeoutError):
+                if not retryable_call or attempt + 1 >= self.max_attempts:
+                    raise RemoteError(f"{method} {urllib.parse.urlsplit(path).path}: connection failed; outcome may be uncertain") from None
+            self.wait(delay, guard)
 
 
 def adf_text(value):
@@ -64,10 +108,13 @@ def to_adf(text):
 
 
 class Jira:
+    def issue_url(self, key):
+        return self.cfg.jira_url.rstrip("/") + "/browse/" + key
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         auth = base64.b64encode(f"{secret('JIRA_EMAIL')}:{secret('JIRA_API_TOKEN')}".encode()).decode()
-        self.http = HTTP(cfg.jira_url, {"Authorization": "Basic " + auth, "Accept": "application/json"})
+        self.http = HTTP(cfg.jira_url, {"Authorization": "Basic " + auth, "Accept": "application/json"}, cfg.http_max_attempts)
         self.bot = self.http.call("GET", "/rest/api/3/myself")["accountId"]
         if self.bot in cfg.allowed_jira_accounts:
             raise ValueError("Use a separate Jira bot account; it cannot be an authorized human")
@@ -121,11 +168,17 @@ class Jira:
 
 
 class GitHub:
+    def git_remote(self):
+        return f"https://github.com/{self.cfg.github_repo}.git"
+
+    def git_credentials(self):
+        return "x-access-token", secret("GITHUB_TOKEN")
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.http = HTTP("https://api.github.com", {
             "Authorization": "Bearer " + secret("GITHUB_TOKEN"),
-            "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"})
+            "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}, cfg.http_max_attempts)
         self.root = "/repos/" + cfg.github_repo
 
     def pages(self, path, field=None):
@@ -169,9 +222,3 @@ class GitHub:
 
     def reviews(self, number):
         return self.pages(self.root + f"/pulls/{number}/reviews")
-
-    def merge(self, number, sha):
-        result = self.http.call("PUT", self.root + f"/pulls/{number}/merge", {"sha": sha, "merge_method": "squash"})
-        if not result.get("merged"):
-            raise RemoteError("GitHub did not merge; repository rules or branch state may block it")
-        return result

@@ -2,6 +2,7 @@ import copy
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from ticketforge.demo import KEY, fixture
@@ -44,7 +45,8 @@ class WorkflowTests(unittest.TestCase):
         self.assertNotEqual(coder["workspace"], reviewer["workspace"])
         self.assertNotIn("coder_result", reviewer["task"])
         self.assertNotIn("review_findings_or_failed_checks", reviewer["task"])
-        head = self.approve()
+        head = self.c.store.get(KEY)["data"]["head"]
+        self.c.github.human_merge(1, head)
         self.c.tick()
         self.c.flush()
         self.assertEqual(self.c.store.get(KEY)["state"], "merged")
@@ -103,11 +105,11 @@ class WorkflowTests(unittest.TestCase):
     def test_failing_checks_prevent_review_and_pr(self):
         self.c.jira.say("Use a threshold of 150.")
         self.c.poll()
-        self.c.sandbox.run = lambda *a: {"exit_code": 1, "output": "meaningful failing check"}
+        self.c.sandbox.run = lambda *a, **kw: {"exit_code": 1, "output": "meaningful failing check"}
         self.c.tick()
         self.assertEqual(self.c.store.get(KEY)["state"], "ready")
         self.assertIsNone(self.c.github.record)
-        self.assertEqual([x["role"] for x in self.c.agents.calls], ["coder"])
+        self.assertEqual([x["role"] for x in self.c.agents.calls], ["assessor", "coder"])
         self.assertIn("meaningful failing check", self.c.store.get(KEY)["data"]["feedback"][0]["output"])
 
     def test_review_loop_is_bounded(self):
@@ -125,17 +127,20 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.c.store.get(KEY)["state"], "blocked")
         self.assertIsNone(self.c.github.record)
 
-    def test_pending_ci_and_human_change_request_block_merge(self):
+    def test_ci_and_reviews_are_reported_but_only_a_human_merges(self):
         self.ready_pr()
-        self.approve()
         self.c.github.check_results = {"tests": "in_progress"}
         self.c.tick()
         self.assertEqual(self.c.github.merge_calls, [])
         self.c.github.check_results = {"tests": "success"}
-        self.c.github.review_results = [{"id": 1, "user": {"login": "reviewer"}, "state": "CHANGES_REQUESTED"}]
+        self.c.github.review_results = [{"id": 1, "user": {"login": "human"}, "state": "APPROVED"}]
+        self.c.status_schedule.clear()
         self.c.tick()
         self.assertEqual(self.c.github.merge_calls, [])
-        self.c.github.review_results.append({"id": 2, "user": {"login": "reviewer"}, "state": "APPROVED"})
+        self.assertEqual(self.c.store.get(KEY)["state"], "awaiting_approval")
+        head = self.c.store.get(KEY)["data"]["head"]
+        self.c.github.human_merge(1, head)
+        self.c.status_schedule.clear()
         self.c.tick()
         self.assertEqual(self.c.store.get(KEY)["state"], "merged")
 
@@ -161,30 +166,19 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.c.jira.posts), count)
         self.assertEqual(self.c.store.pending_posts(), [])
 
-    def test_uncertain_merge_is_reconciled_without_second_merge(self):
+    def test_no_merge_api_exists_on_the_production_code_host(self):
+        from ticketforge.integrations import GitHub
+        self.assertFalse(hasattr(GitHub, "merge"))
         self.ready_pr()
-        self.approve()
-        original = self.c.github.merge
-        def uncertain(*args):
-            original(*args)
-            raise TimeoutError("Response lost after remote merge")
-        self.c.github.merge = uncertain
-        with self.assertLogs("ticketforge.coordinator", level="ERROR"):
-            self.c.tick()
-        self.assertEqual(self.c.store.get(KEY)["state"], "merging")
         self.c.tick()
-        self.assertEqual(self.c.store.get(KEY)["state"], "merged")
-        self.assertEqual(len(self.c.github.merge_calls), 1)
+        self.assertEqual(self.c.github.merge_calls, [])
 
-    def test_input_during_merge_is_recorded_as_follow_up(self):
+    def test_input_after_human_merge_is_recorded_as_follow_up(self):
         self.ready_pr()
-        self.approve()
-        original = self.c.github.merge
-        def race(*args):
-            self.c.jira.say("Also add international shipping.")
-            self.c.sync_one(KEY)
-            return original(*args)
-        self.c.github.merge = race
+        head = self.c.store.get(KEY)["data"]["head"]
+        self.c.github.human_merge(1, head)
+        self.c.jira.say("Also add international shipping.")
+        self.c.poll()
         self.c.tick()
         self.c.flush()
         self.assertEqual(self.c.store.get(KEY)["state"], "merged")
@@ -221,7 +215,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_manual_merge_completion_is_reported_on_jira(self):
         ticket = self.ready_pr()
-        self.c.github.merge(1, ticket["data"]["head"])
+        self.c.github.human_merge(1, ticket["data"]["head"])
         self.c.tick()
         self.c.flush()
         self.assertEqual(self.c.store.get(KEY)["state"], "merged")
@@ -236,15 +230,15 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ExecutionError, "operator-protected"):
             self.c.repo.commit(workspace, KEY, 1)
 
-    def test_auto_merge_disabled_still_accepts_and_reports_approval(self):
+    def test_jira_approval_command_cannot_approve_or_merge(self):
         self.ready_pr()
-        self.c.cfg.auto_merge = False
         self.approve()
         self.c.tick()
         self.c.flush()
         self.assertEqual(self.c.store.get(KEY)["state"], "awaiting_approval")
         self.assertEqual(self.c.github.merge_calls, [])
-        self.assertTrue(any("Automatic merging is disabled" in p["body"] for p in self.c.jira.posts))
+        self.assertIsNone(self.c.store.get(KEY)["data"].get("approval"))
+        self.assertTrue(any("Approve and merge on GitHub" in p["body"] for p in self.c.jira.posts))
 
     def test_review_workspace_experiments_do_not_change_coder_files(self):
         ticket = self.ready_pr()
@@ -295,6 +289,87 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.c.store.get(KEY)["state"], "blocked")
         self.assertEqual(self.c.agents.calls, [])
         self.assertTrue(any("root Go module" in p["body"] for p in self.c.jira.posts))
+
+    def test_waiting_pr_is_polled_only_on_its_schedule(self):
+        self.ready_pr()
+        with patch.object(self.c.github, "pr", wraps=self.c.github.pr) as remote:
+            with patch("ticketforge.coordinator.time.monotonic", return_value=100):
+                for _ in range(5): self.c.tick()
+                self.assertEqual(remote.call_count, 1)
+            with patch("ticketforge.coordinator.time.monotonic", return_value=131):
+                self.c.tick()
+                self.assertEqual(remote.call_count, 2)
+            self.c.github.human_merge(1, self.c.store.get(KEY)["data"]["head"])
+            with patch("ticketforge.coordinator.time.monotonic", return_value=162):
+                self.c.tick()
+            self.assertEqual(self.c.store.get(KEY)["state"], "merged")
+
+    def test_verification_repairs_do_not_consume_review_rounds(self):
+        self.c.cfg.max_review_rounds = 1
+        self.c.jira.say("Use 150.")
+        self.c.poll()
+        original = self.c.sandbox.run
+        count = [0]
+        def flaky(*args, **kwargs):
+            count[0] += 1
+            return {"exit_code": 1, "output": "reproducible failed check"} if count[0] <= 2 else original(*args, **kwargs)
+        self.c.sandbox.run = flaky
+        self.c.tick(); self.c.tick()
+        self.assertEqual(self.c.store.get(KEY)["data"].get("review_round", 0), 0)
+        self.c.tick()
+        self.assertEqual(self.c.store.get(KEY)["state"], "awaiting_approval")
+        self.assertEqual(self.c.store.get(KEY)["data"]["review_round"], 1)
+
+    def test_nested_environment_file_cannot_be_committed(self):
+        workspace, _ = self.c.repo.prepare(KEY)
+        path = workspace / "cmd" / "api" / ".env.production"
+        path.parent.mkdir(parents=True)
+        path.write_text("PLACEHOLDER=not-a-real-secret")
+        from ticketforge.runtime import ExecutionError
+        with self.assertRaisesRegex(ExecutionError, "operator-protected"):
+            self.c.repo.commit(workspace, KEY, 1)
+
+    def test_note_does_not_restart_a_waiting_pr(self):
+        before = self.ready_pr()
+        self.c.jira.say("/forge note I will review tomorrow.")
+        self.c.poll()
+        after = self.c.store.get(KEY)
+        self.assertEqual(after["version"], before["version"])
+        self.assertEqual(after["state"], "awaiting_approval")
+        self.c.flush()
+        self.assertTrue(any("No new implementation requested" in p["body"] for p in self.c.jira.posts))
+
+    def test_assessment_question_stops_before_coding(self):
+        self.c.tick()
+        self.assertEqual(self.c.store.get(KEY)["state"], "waiting_input")
+        self.assertEqual([c["role"] for c in self.c.agents.calls], ["assessor"])
+
+    def test_remote_retry_defers_and_eventually_blocks_saved_work(self):
+        from ticketforge.integrations import RateLimited
+        self.ready_pr()
+        def limited(ticket):
+            raise RateLimited(60)
+        self.c.check_merge = limited
+        with patch("ticketforge.coordinator.time.time", return_value=100):
+            self.c.tick()
+            self.assertEqual(self.c.store.get(KEY)["data"]["retry_at"], 160)
+            self.c.tick()
+            self.assertEqual(self.c.store.get(KEY)["data"]["remote_retries"], 1)
+        for i in range(self.c.cfg.max_remote_retries):
+            self.c.status_schedule.clear()
+            with patch("ticketforge.coordinator.time.time", return_value=200 + i * 100):
+                self.c.tick()
+        self.assertEqual(self.c.store.get(KEY)["state"], "blocked")
+        self.c.flush()
+        self.assertTrue(any("Retry budget exhausted" in p["body"] for p in self.c.jira.posts))
+
+    def test_target_commits_use_configured_author(self):
+        self.c.cfg.commit_author_name = "Configured Author"
+        self.c.cfg.commit_author_email = "configured@example.invalid"
+        ticket = self.ready_pr()
+        workspace, _ = self.c.repo.prepare(KEY)
+        self.assertEqual(self.c.repo.git("show", "-s", "--format=%an <%ae>", ticket["data"]["head"], cwd=workspace),
+                         "Configured Author <configured@example.invalid>")
 
 
 if __name__ == "__main__":
