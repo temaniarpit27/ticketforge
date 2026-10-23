@@ -10,9 +10,9 @@ from ticketforge.store import Superseded
 
 
 class HTTPTests(unittest.TestCase):
-    def http(self, outcomes, base="https://api.example"):
+    def http(self, outcomes, base="https://api.example", retryable_posts=()):
         calls, sleeps = [], []
-        http = HTTP(base, {}, sleeper=sleeps.append)
+        http = HTTP(base, {}, sleeper=sleeps.append, retryable_posts=retryable_posts)
         def open_request(*args, **kwargs):
             calls.append(args[0].method)
             value = outcomes.pop(0)
@@ -34,9 +34,14 @@ class HTTPTests(unittest.TestCase):
         self.assertTrue(waits)
 
     def test_model_529_can_retry_before_any_tool_executes(self):
-        http, calls, _ = self.http([self.error(529), {"content": []}], "https://api.anthropic.com")
-        self.assertEqual(http.call("POST", "/v1/messages", {}), {"content": []})
+        http, calls, _ = self.http([self.error(529), {"content": []}], "https://api.anthropic.com/v1", {"/messages"})
+        self.assertEqual(http.call("POST", "/messages", {}), {"content": []})
         self.assertEqual(calls, ["POST", "POST"])
+        # A POST path not declared side-effect free is never repeated.
+        http, calls, _ = self.http([self.error(529), {"content": []}], "https://api.anthropic.com/v1")
+        with self.assertRaises(RemoteError):
+            http.call("POST", "/messages", {})
+        self.assertEqual(calls, ["POST"])
 
     def test_issue_write_and_put_are_never_blindly_retried(self):
         for method in ("POST", "PUT"):

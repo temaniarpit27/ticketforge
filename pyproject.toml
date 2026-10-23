@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ticketforge"
-version = "0.2.0"
+version = "0.3.0"
 description = "Jira-first coding and independent review with human-controlled merging"
 requires-python = ">=3.9"
 dependencies = []

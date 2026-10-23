@@ -24,14 +24,16 @@ class BoundaryTests(unittest.TestCase):
 
     def test_jira_excludes_bot_and_unauthorized_authors(self):
         jira = Jira.__new__(Jira)
-        jira.cfg = SimpleNamespace(allowed_jira_accounts=["human"])
+        jira.cfg = SimpleNamespace(allowed_jira_accounts=["human"], require_agent_assignment=True)
         jira.bot = "bot"
-        jira.http = SimpleNamespace(call=lambda *a, **kw: {"fields": {"summary": "Task", "description": to_adf("Details")}})
+        jira.http = SimpleNamespace(call=lambda *a, **kw: {"fields": {"summary": "Task", "description": to_adf("Details"),
+                                                                      "assignee": {"accountId": "bot"}}})
         jira.comments = lambda key: [{"id": str(i), "author": {"accountId": author}, "body": to_adf(body)}
                                      for i, (author, body) in enumerate([
                                          ("bot", "I am working"), ("stranger", "/forge approve " + "a" * 40),
                                          ("human", "Use 150"), ("human", "/forge pause")])]
         snapshot, comments = jira.snapshot("APP-1")
+        self.assertTrue(snapshot["assigned_to_agent"])
         self.assertEqual([n["text"] for n in snapshot["notes"]], ["Use 150"])
         self.assertEqual(len(comments), 2)
 
@@ -109,8 +111,8 @@ class BoundaryTests(unittest.TestCase):
                 cfg.validate()
 
     def test_agent_tool_result_loop_and_independent_model_selection(self):
-        cfg = SimpleNamespace(max_agent_steps=4, max_input_chars=100000, max_output_tokens=1000,
-                              coder_model="coder", reviewer_model="reviewer")
+        cfg = SimpleNamespace(max_agent_steps=4, max_input_chars=100000, max_output_tokens=1000, reviewer_max_output_tokens=2000,
+                              coder_model="coder", reviewer_model="reviewer", coder_provider="anthropic", reviewer_provider="anthropic")
         agents = Agents.__new__(Agents)
         agents.cfg = cfg
         agents.skill_root = Path(__file__).resolve().parents[1] / "ticketforge" / "skills"
@@ -121,21 +123,22 @@ class BoundaryTests(unittest.TestCase):
             if len(requests) == 1:
                 return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "one", "name": "shell", "input": {"command": "ls"}}]}
             return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "two", "name": "finish", "input": {
-                "status": "pass", "summary": "No actionable findings", "questions": [], "findings": []}}]}
-        agents.http = SimpleNamespace(call=call)
+                "status": "pass", "summary": "No actionable findings", "questions": [], "findings": [], "resolutions": []}}]}
+        agents.clients = {"anthropic": SimpleNamespace(call=call)}
         result = agents.run("reviewer", Path("/unused"), {"specification": "task"}, lambda: None, lambda e: None)
         self.assertEqual(result["status"], "pass")
         self.assertEqual(requests[0]["model"], "reviewer")
+        self.assertEqual(requests[0]["max_tokens"], 2000)
         self.assertEqual(requests[1]["messages"][-1]["content"][0]["tool_use_id"], "one")
         self.assertIn("evidence", requests[1]["messages"][-1]["content"][0]["content"])
 
     def test_model_truncation_cannot_be_accepted_as_success(self):
-        cfg = SimpleNamespace(max_agent_steps=1, max_input_chars=100000, max_output_tokens=10,
-                              coder_model="coder", reviewer_model="reviewer")
+        cfg = SimpleNamespace(max_agent_steps=1, max_input_chars=100000, max_output_tokens=10, reviewer_max_output_tokens=10,
+                              coder_model="coder", reviewer_model="reviewer", coder_provider="anthropic", reviewer_provider="anthropic")
         agents = Agents.__new__(Agents)
         agents.cfg = cfg
         agents.skill_root = Path(__file__).resolve().parents[1] / "ticketforge" / "skills"
-        agents.http = SimpleNamespace(call=lambda *a, **kw: {"stop_reason": "max_tokens", "content": []})
+        agents.clients = {"anthropic": SimpleNamespace(call=lambda *a, **kw: {"stop_reason": "max_tokens", "content": []})}
         with self.assertRaises(ExecutionError):
             agents.run("coder", Path("/unused"), {}, lambda: None, lambda e: None)
 

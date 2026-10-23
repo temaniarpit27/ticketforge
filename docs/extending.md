@@ -21,9 +21,25 @@ must use the normalized contract rather than leaking native API shapes into the 
 Host Git fetch/push uses the selected code host's URL and credentials. Model tools never
 receive those credentials.
 
-An agent runner already has a separate `run(role, workspace, task, guard, trace)` interface.
-The current implementation uses Anthropic; it can later be replaced independently of the
-ticket lifecycle. No automatic host imports from repository files are supported.
+An agent runner has a separate `run(role, workspace, task, guard, trace, on_finish=None)`
+interface, so the inner engine can be replaced independently of the ticket lifecycle.
+`on_finish` lets the coordinator reject a result (a `ValueError` returned to the model as a
+tool error) or reply and continue the same conversation; the coder/reviewer dialogue
+depends on it. No automatic host imports from repository files are supported.
+
+## Adding a model provider
+
+Usually no code: add an entry to `model_providers` in the profile (see the README). Any
+endpoint speaking Anthropic Messages, OpenAI Responses, or OpenAI-compatible Chat Completions
+works, including local servers. The model must support tool/function calling.
+
+A new wire protocol needs a session class in `ticketforge/models.py` with a `path`, a
+`step(guard)` that returns a `Turn` of normalized calls (`{id, name, input}`; `input` is
+`None` for unparseable arguments) plus `stopped` (`truncated`, `refused`, `failed`, or `None`),
+and `respond(outputs)` that appends tool results in the provider's own format. Register it
+in `SESSIONS` and add its name to `config.MODEL_APIS`. Keep each call paired with its result
+when compacting history, never report a truncated response as success, and test it
+against recorded responses like `tests/test_models.py`.
 
 ## Adding a tracker, for example GitHub Issues
 
@@ -32,6 +48,9 @@ ticket lifecycle. No automatic host imports from repository files are supported.
    owner/repository. Native URLs belong in metadata, not filenames. Different repositories
    need separate state directories and nonoverlapping filters.
 3. Normalize snapshots to `{summary, description, notes}` and comments to `{id, author, text}`.
+   Put any extra requirement fields under `fields` (`{name: text}`), only when configured.
+   Add `assigned_to_agent` (boolean) when the tracker has assignees; the store removes it
+   from the specification and uses it to stop or resume work. Omitted means assigned.
    IDs/authors must be stable strings. Exclude bot/unauthorized comments. Include edits and
    deletions in each complete snapshot. Keep command comments out of ordinary notes.
 4. Preserve a bot-owned marker when reconciling outgoing comments. Handle pagination,

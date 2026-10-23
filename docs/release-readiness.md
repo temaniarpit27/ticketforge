@@ -1,4 +1,9 @@
-# Prototype: 0.2.0
+# Prototype: 0.3.0
+
+0.3.0 adds the coder/reviewer dialogue (finding ledger, independent pass then reconciliation,
+escalation to Jira), configurable model providers per role, and assignment-based pickup.
+Offline tests cover the protocol with scripted agents and recorded provider API shapes; no
+live model pair has been evaluated. The sections below record the 0.2.0 review and its fixes.
 
 External review approved prototype publication conditional on excluding vendor/testdata
 from formatting checks. That correction has regression coverage in the real Docker test.
@@ -13,9 +18,9 @@ No live Jira/GitHub/model end-to-end pilot has been completed.
 | 3 | Fixed with retention limitation | Persistent isolated caches; reviewer rounds reuse ticket/role/image cache; no automatic quota/cleanup |
 | 4 | Fixed | Waiting PR schedule defaults to 30s; mock call-count regression |
 | 5 | Fixed with explicit bounds | Canonical task preserved; archived observations recoverable; oversized canonical input blocks |
-| 6 | Known limitation | No stable findings/rebuttal ledger or second reconciliation pass |
+| 6 | Fixed in 0.3.0 | Finding ledger, per-finding coder responses, independent pass then reconciliation, escalation to Jira |
 | 7 | Fixed | Verification repair and review budgets are separate |
-| 8 | Known limitation | Findings remain strings; no independent advisory channel |
+| 8 | Fixed in 0.3.0 | Structured findings with blocking/advisory severity; advisories go to the PR |
 | 9 | Fixed | Read-only assessment precedes coding for each new specification |
 | 10 | Deliberate current scope | GitHub status mirrored; implementation requests belong on Jira |
 | 11 | Fixed escape hatch | Ordinary comments remain inputs; /forge note records non-actionable notes |

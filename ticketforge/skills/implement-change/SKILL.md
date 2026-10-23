@@ -15,9 +15,18 @@ description: Implement the current Jira specification with focused changes and e
    cancellation, close owned resources, and check concurrency/race behavior where relevant.
    Respect the declared toolchain and compatibility constraints. Do not blindly run tidy
    or add dependencies unavailable in the offline image; report environment limitations.
-6. If review findings exist, reproduce or investigate each. Fix valid findings. If disputing one,
-   supply concrete code or execution evidence; do not dismiss it by assertion.
-7. Return ready only when the requested change is implemented. Return blocked for unavailable
+6. open_findings lists the reviewer's unresolved findings by ID, with its latest reasoning.
+   Reproduce or investigate each. Fix valid ones. Dispute one only with concrete code or
+   execution evidence (a test, a quoted requirement), never by assertion. When returning
+   ready, include exactly one response per open finding ID: action fixed or disputed, with
+   evidence. The reviewer reconciles each response; repeated disagreement goes to the human.
+   failed_checks lists verification commands that failed after your previous attempt.
+7. previous_specification, when present, is the requirements version the existing workspace
+   changes were written for. Compare it with the current specification: implement what is
+   new or changed, and remove or adjust work for anything that was dropped. Do not keep code
+   only because it already exists. If a change makes an open finding irrelevant, dispute it
+   and cite the requirement change as evidence.
+8. Return ready only when the requested change is implemented. Return blocked for unavailable
    prerequisites, and needs_input for unresolved product requirements.
 
 Do not modify Git metadata, commits, remotes, CI workflow files, dependency lockfiles merely

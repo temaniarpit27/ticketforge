@@ -44,7 +44,8 @@ class WorkflowTests(unittest.TestCase):
         reviewer = next(x for x in calls if x["role"] == "reviewer")
         self.assertNotEqual(coder["workspace"], reviewer["workspace"])
         self.assertNotIn("coder_result", reviewer["task"])
-        self.assertNotIn("review_findings_or_failed_checks", reviewer["task"])
+        for private in ("coder_result", "open_findings", "failed_checks", "assessment"):
+            self.assertNotIn(private, reviewer["task"])
         head = self.c.store.get(KEY)["data"]["head"]
         self.c.github.human_merge(1, head)
         self.c.tick()
@@ -72,11 +73,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_input_during_model_call_prevents_stale_tools_and_publication(self):
         original = self.c.agents.run
-        def interrupted(role, workspace, task, guard, trace):
+        def interrupted(role, workspace, task, guard, trace, on_finish=None):
             self.c.jira.say("Use 150 and clarify the currency.")
             self.c.sync_one(KEY)
             guard()
-            return original(role, workspace, task, guard, trace)
+            return original(role, workspace, task, guard, trace, on_finish)
         self.c.agents.run = interrupted
         self.c.tick()
         self.assertEqual(self.c.store.get(KEY)["state"], "ready")
@@ -86,12 +87,12 @@ class WorkflowTests(unittest.TestCase):
         self.c.jira.say("Use a threshold of 150.")
         self.c.poll()
         original = self.c.agents.run
-        def interrupted(role, workspace, task, guard, trace):
+        def interrupted(role, workspace, task, guard, trace, on_finish=None):
             if role == "reviewer":
                 self.c.jira.say("/forge pause")
                 self.c.sync_one(KEY)
                 guard()
-            return original(role, workspace, task, guard, trace)
+            return original(role, workspace, task, guard, trace, on_finish)
         self.c.agents.run = interrupted
         self.c.tick()
         self.assertEqual(self.c.store.get(KEY)["state"], "paused")
@@ -110,21 +111,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(self.c.store.get(KEY)["state"], "ready")
         self.assertIsNone(self.c.github.record)
         self.assertEqual([x["role"] for x in self.c.agents.calls], ["assessor", "coder"])
-        self.assertIn("meaningful failing check", self.c.store.get(KEY)["data"]["feedback"][0]["output"])
+        self.assertIn("meaningful failing check", self.c.store.get(KEY)["data"]["failed_checks"][0]["output"])
 
     def test_review_loop_is_bounded(self):
         self.c.jira.say("Use a threshold of 150.")
         self.c.poll()
         original = self.c.agents.run
-        def always_find(role, *args):
-            value = original(role, *args)
-            if role == "reviewer":
-                return {**value, "status": "changes_requested", "findings": ["Reproducible defect"]}
-            return value
+        def always_find(role, workspace, task, guard, trace, on_finish=None):
+            if role != "reviewer":
+                return original(role, workspace, task, guard, trace, on_finish)
+            # A fresh blocking finding every round, so the dialogue never settles.
+            return {"status": "changes_requested", "summary": "Defect", "questions": [], "resolutions": [],
+                    "findings": [{"severity": "blocking", "file": "shipping.py", "line": 2,
+                                  "problem": "Reproducible defect", "evidence": "repro"}]}
         self.c.agents.run = always_find
         for _ in range(self.c.cfg.max_review_rounds + 1):
             self.c.tick()
-        self.assertEqual(self.c.store.get(KEY)["state"], "blocked")
+        ticket = self.c.store.get(KEY)
+        self.assertEqual(ticket["state"], "blocked")
+        self.assertNotIn("error", ticket["data"])
+        self.assertEqual(len(ticket["data"]["findings"]["items"]), self.c.cfg.max_review_rounds)
         self.assertIsNone(self.c.github.record)
 
     def test_ci_and_reviews_are_reported_but_only_a_human_merges(self):

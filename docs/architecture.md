@@ -4,7 +4,7 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ready: matching issue
+    [*] --> ready: matching issue assigned to the agent
     ready --> assessing: new specification
     assessing --> waiting_input: material question
     assessing --> coding: actionable plan
@@ -13,7 +13,8 @@ stateDiagram-v2
     coding --> ready: failed checks within repair budget
     coding --> reviewing: checks pass, commit saved
     reviewing --> waiting_input: material ambiguity
-    reviewing --> ready: evidenced defects within review budget
+    reviewing --> waiting_input: finding disputed past max_finding_disputes
+    reviewing --> ready: open blocking findings within review budget
     reviewing --> publishing: pass
     publishing --> awaiting_approval: PR linked on Jira
     awaiting_approval --> ready: new requirements
@@ -24,7 +25,44 @@ stateDiagram-v2
     blocked --> ready: guidance or retry
     ready --> paused: pause
     paused --> ready: resume
+    ready --> unassigned: ticket unassigned from agent
+    waiting_input --> unassigned: ticket unassigned from agent
+    unassigned --> ready: reassigned to agent
 ```
+
+Requirement changes (comments, summary, description, or `jira_spec_fields`) bump the version
+from any active state, including `awaiting_approval`; new work is pushed onto the same PR. The
+coordinator records the spec each coding and review round used (`worked_specification`,
+`reviewed_specification`) and gives agents the older one as `previous_specification`, so they
+can drop obsolete work and withdraw findings that no longer apply.
+
+Unassigning stops any agent state (`ready` through `blocked`) and bumps the version so an
+in-flight model run is discarded. An open PR (`awaiting_approval`) keeps being tracked.
+
+## Coder/reviewer dialogue
+
+Findings live in a ledger in ticket data (`review.py`), with stable IDs that survive new
+specification versions. Each finding is `open`, `resolved`, `withdrawn`, `advisory`, or
+`escalated`.
+
+| Step | Who | Sees | Must return |
+|---|---|---|---|
+| Fix | coder | spec, open findings + reviewer's latest reasoning, failed checks | one `fixed`/`disputed` response per open ID |
+| Independent review | reviewer | spec, base/head SHAs | new findings, no resolutions |
+| Reconcile (same session) | reviewer | prior open findings + coder's per-finding evidence | one resolution per prior ID |
+| Decide | coordinator | ledger | publish, return to coder, or escalate to Jira |
+
+The second reviewer pass is a `finish` hook: the coordinator answers the first `finish` call
+with the prior findings as the tool result, so the reviewer's first look is provably
+independent. A reviewer `open` after a coder `disputed` counts as one dispute; at
+`max_finding_disputes` the finding is escalated with both sides' evidence on Jira. Human input
+creates a new version, which reopens escalated findings with fresh dispute counts.
+
+Providers are configuration (`config.provider_specs`): a name maps to a wire protocol, base
+URL, key variable and auth style. `models.py` has one session class per protocol behind the
+same `step`/`respond` interface: Anthropic Messages, OpenAI Responses with `store: false`
+(reasoning and call items replayed unchanged), and OpenAI-compatible Chat Completions.
+OpenAI-style transcripts compact by dropping whole turns so calls and results stay paired.
 
 `awaiting_approval` is the persisted human-waiting state, not a Jira approval gate.
 The code host exposes no merge method. Only a human approves/merges through GitHub.
@@ -42,8 +80,10 @@ There is no mandatory human plan-approval gate: actionable assessment proceeds t
 | store | Versioned specifications, transactions, events, durable outbox |
 | integrations | Jira/GitHub APIs, pagination, retries, write reconciliation |
 | adapters | Explicit tracker, code-host and language contracts/registries |
-| runtime | Host Git, container execution, Anthropic tool loop |
-| context | Bounded message views and archived observation references |
+| runtime | Host Git, container execution, provider-neutral agent tool loop |
+| models | Tool-calling sessions per wire protocol behind one interface |
+| review | Finish schemas, validation, finding ledger, dispute/escalation rules |
+| context | Bounded message/turn views and archived observation references |
 | project | Go manifest/guides/skill discovery and external profile generation |
 | coordinator | Assessment, coding, verification, review, PR handoff and status |
 | cli | Foreground service, local checks, process lock |

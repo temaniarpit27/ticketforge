@@ -1,31 +1,40 @@
 # TicketForge
 
-A local Jira-to-PR coding agent for standalone Go repositories. Jira holds the requirements,
-questions, answers, and progress updates. A coder implements the ticket, a separate reviewer
-inspects the commit, and you approve and merge the PR on GitHub.
+TicketForge is an AI teammate for Go projects that works from Jira. You assign it a ticket;
+it asks questions if anything is unclear, writes the code, has a second AI review that code,
+fixes what the reviewer finds, and opens a pull request. **You always review and merge.**
 
-**Prototype:** TicketForge is a learning project and demo of agent orchestration. The initial integrations
-are **Jira Cloud, GitHub, and Anthropic Messages**. No live-account end-to-end pilot has been
-completed. The offline demo uses scripted actors; real Docker tests verify Go execution.
+**Status: prototype.** It is a learning project. It works with Jira Cloud and GitHub, and
+with any AI model you configure (Claude, OpenAI, Gemini, a local model, and so on). It has
+been tested offline and in Docker, but not yet with real accounts on a real project.
 
-## Workflow
+## How it works, in plain words
 
-1. The local worker discovers a ticket matching your Jira filter.
-2. A read-only assessment inspects the repository and posts a plan or material questions.
-3. You answer on Jira. You can add requirements during any active stage.
-4. The coder edits an isolated checkout. The coordinator runs configured checks.
-5. A fresh reviewer session examines the specification and fixed commit in a separate checkout.
-   Evidence-backed findings return to the coder within bounded repair rounds.
-6. The worker pushes a branch, creates or updates a PR, and posts its link on Jira.
-7. You review, approve, and merge on GitHub. The worker observes completion and reports it on Jira.
+Think of a small team: a developer, a reviewer, and you as the lead.
 
-New authorized Jira input increments the specification version. Old tool results are discarded
-at the next checked boundary; changed work needs fresh verification and review. Already sent
-remote requests cannot be undone. Human merges are authoritative: later input becomes follow-up work.
+1. **You assign a Jira ticket to the bot account.** Only assigned tickets are picked up.
+   Unassign it and the work stops.
+2. **The developer reads first.** The coder AI looks at the ticket and the code without
+   changing anything, then posts its plan on Jira, or asks you questions and waits.
+3. **You answer on Jira.** You can add or change requirements at any time: a comment, an edit
+   to the summary or description, or any field listed in `jira_spec_fields`. The work restarts
+   on the new version, unfinished work on the old one is thrown away, and both AIs are shown
+   the old requirements next to the new ones so they can see exactly what changed. If a pull
+   request is already open, the new commit is added to the same pull request.
+4. **The developer writes the code** in a private copy of the repository, inside a locked-down
+   container with no internet access and no passwords.
+5. **TicketForge runs the checks itself** (formatting, build, tests, race tests, vet). It does
+   not take the AI's word that tests pass. Failures go back to the coder.
+6. **The reviewer AI checks the change** on its own copy, without seeing the coder's reasoning.
+   It can be the same model as the coder or a different one.
+7. **They talk it through.** Every problem the reviewer finds gets an ID like `F1`. The coder
+   must answer each one: "fixed", or "disagree" with proof. The reviewer then marks each as
+   solved, still a problem, or withdrawn. If they keep disagreeing, **you decide** on Jira.
+8. **A pull request is opened** once nothing serious is left, and its link is posted on Jira.
+9. **You review and merge on GitHub.** TicketForge cannot merge; it only reports what happened.
 
-**TicketForge has no merge API.** GitHub checks and review status are mirrored to Jira, but
-GitHub branch rules and your review determine whether to merge. Jira workflow columns are
-not changed; status is reported through timestamped comments.
+Jira holds the conversation (questions, answers, progress). GitHub holds the code. Jira
+columns are never moved automatically; progress is posted as comments.
 
 ## Try the offline demo
 
@@ -68,7 +77,13 @@ are alternatives for manual setup.
 | `repo`, `github_repo`, `base_branch` | Existing target checkout, GitHub owner/repository, and base branch |
 | `jira_url`, `jira_jql` | Jira Cloud site and explicit opt-in filter; start with one test ticket |
 | `allowed_jira_accounts` | Account IDs whose comments may instruct the agent |
-| `coder_model`, `reviewer_model` | Anthropic model IDs available to your account |
+| `coder_provider`, `reviewer_provider` | Provider name per role: built-in `anthropic`/`openai`, or one you define in `model_providers` |
+| `coder_model`, `reviewer_model` | Model ID per role; both roles may use the same provider and model |
+| `model_providers` | Your own providers (see below) |
+| `reviewer_max_output_tokens` | Reviewer output budget (25000; reasoning models need room) |
+| `max_finding_disputes` | Times a finding may stay disputed before you decide on Jira (2) |
+| `require_agent_assignment` | Only work on tickets assigned to the agent's Jira account (true) |
+| `jira_spec_fields` | Extra Jira fields that are part of the requirements, such as an acceptance-criteria custom field (`["customfield_10034"]`) |
 | `verification_commands` | Generated defaults check formatting, build, tests, race tests, and vet |
 | `sandbox_image` | Toolchain/dependency image for this repository |
 | `project_guide` | Optional external project context; generated profiles use `PROJECT.md` |
@@ -81,6 +96,8 @@ are alternatives for manual setup.
 is a legacy field; it does not enforce merge policy. Configure required checks on GitHub.
 
 Use a **separate Jira bot account**; it cannot also be an authorized human account.
+Hand a ticket to the agent by assigning it to that account (it must be assignable in the
+project); unassign it to stop. Set `require_agent_assignment` to false to use the filter alone.
 Only allowlisted human comments become instructions. Ticket summary/description are inputs
 too, so Jira project permissions must restrict who can edit them.
 
@@ -88,15 +105,63 @@ too, so Jira project permissions must restrict who can edit them.
 JIRA_EMAIL=the-bot-account-email
 JIRA_API_TOKEN=the-bot-api-token
 GITHUB_TOKEN=your-repository-token
-ANTHROPIC_API_KEY=your-model-api-key
+ANTHROPIC_API_KEY=your-anthropic-key   # if a role uses anthropic
+OPENAI_API_KEY=your-openai-key         # if a role uses openai
+# plus the api_key_env of any custom provider you use
 ```
+
+### Choosing models
+
+You choose which AI writes the code and which AI reviews it. They can be the same model or
+different ones. Each needs a **provider** (where to send requests) and a **model** (which AI).
+
+`anthropic` and `openai` are built in. To use anything else, add it under `model_providers`.
+Most AI services accept requests in one of three formats, so you only say which one:
+
+| `api` | Format | Use it for |
+|---|---|---|
+| `anthropic-messages` | Anthropic Messages API | Claude models (built-in `anthropic`) |
+| `openai-responses` | OpenAI Responses API, stateless | OpenAI models, incl. Codex (built-in `openai`) |
+| `openai-chat` | OpenAI-compatible Chat Completions | Gemini, Mistral, DeepSeek, OpenRouter, Azure, Ollama, vLLM, LM Studio, gateways |
+
+```json
+"model_providers": {
+  "gemini": {"api": "openai-chat", "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+             "api_key_env": "GEMINI_API_KEY"},
+  "ollama": {"api": "openai-chat", "base_url": "http://localhost:11434/v1", "auth": "none"}
+},
+"coder_provider": "anthropic", "coder_model": "<claude model id>",
+"reviewer_provider": "gemini",  "reviewer_model": "<gemini model id>"
+```
+
+What each provider field means:
+
+| Field | Meaning |
+|---|---|
+| `api` | Which of the three formats above the service uses |
+| `base_url` | The service address. Must be `https://`, except `http://localhost` for local models |
+| `api_key_env` | The **name** of the environment variable holding the key (the key itself goes in `.env`, never in config) |
+| `auth` | How the key is sent: `bearer` (most services), `x-api-key`, `api-key` (Azure), or `none` (local servers) |
+| `headers` | Extra non-secret headers, if the service needs any |
+| `timeout_seconds` | How long to wait for one answer (default 600; reasoning models can be slow) |
+| `max_tokens_field` | Chat format only: `max_tokens` or `max_completion_tokens`, whichever the service expects |
+
+Good to know:
+
+- The model must support tool calling (sometimes called function calling).
+- **Same model for both roles works.** The reviewer still starts fresh, with its own copy
+  of the code and no view of the coder's reasoning.
+- **Different model families catch more**, because they tend to make different mistakes.
+- The planning step (assessor) uses the coder's model.
+- Reusing a built-in name (for example `anthropic`) replaces it, such as to go through a company gateway.
 
 Values are literal strings; existing environment variables take precedence. Keep secrets in
 the ignored `.env`, never in example files or images. Needed permissions:
 
-- Jira: browse issues, read/add comments, add remote links.
+- Jira: browse issues, read/add comments, add remote links; be assignable to issues.
 - GitHub: target contents and pull requests read/write; checks/statuses read.
-- Anthropic: Messages API access for your models.
+- Model providers: API access for the models you configure. OpenAI Responses requests use
+  `store: false`, so TicketForge replays the conversation rather than the provider keeping it.
 
 Host Git uses an HTTPS askpass helper. Tokens stay on the host and are not included in
 remote URLs or mounted into tool containers. Do not give the bot branch-rule bypass rights.
@@ -124,10 +189,38 @@ toolchain probe. It does not validate remote credentials. `serve` runs in the fo
 Ctrl+C stops it. Restart with the same profile to reconcile persisted work.
 `python3 -m ticketforge status --config <profile>` prints local diagnostic state.
 
-The coordinator and Docker run on your machine; model inference runs at Anthropic.
+The coordinator and Docker run on your machine; model inference runs at the configured providers.
 Sleep/shutdown pauses progress. Each profile supports one repository and one worker.
 Use separate profiles, state directories, images, and nonoverlapping Jira filters for
 other repositories. No public webhook endpoint or automatic repository router is provided.
+
+## How the coder and reviewer talk
+
+Each problem the reviewer finds is written down in a fixed shape: how serious it is
+(`blocking` must be fixed, `advisory` is just a suggestion), the file and line, what is
+wrong, and the proof. It gets an ID (`F1`, `F2`, …) and is kept in a list saved with the
+ticket (the "finding ledger"), so nothing gets lost between rounds.
+
+One round goes like this:
+
+1. **The coder gets the open problems**, each with the reviewer's latest explanation. It
+   cannot finish until it answers every ID: `fixed`, or `disputed` with proof (a test, a
+   line from the ticket). If it skips one, it is told to try again.
+2. **The reviewer looks at the new code fresh.** It is not shown the old problems yet, so
+   it forms its own opinion first instead of just agreeing with what it said before.
+3. **Then the reviewer settles the old problems**, in the same conversation. It now sees each
+   old problem and the coder's answer (only the proof, not the coder's sales pitch), and marks
+   each one `resolved`, `withdrawn` (the coder was right), or `open` (still wrong, and why).
+4. **TicketForge decides what is next.** Anything blocking still open goes back to the coder.
+   Advisory notes never cause another round; they are listed in the pull request instead.
+   When nothing blocking is left, the pull request is opened.
+5. **If they cannot agree, you decide.** When the coder has disputed the same problem
+   `max_finding_disputes` times (default 2) and the reviewer still says it is wrong, the
+   ticket pauses. Jira shows both sides' arguments. Reply with your decision; both AIs then
+   look at that problem again with your answer in the ticket.
+
+`max_review_rounds` (default 3) caps the total number of rounds. Using two different models
+helps, because they tend to make different mistakes, but neither AI replaces your review.
 
 ## Talking to the agent
 
@@ -175,42 +268,47 @@ python3 -m unittest discover -s tests -v
 TICKETFORGE_DOCKER_TESTS=1 python3 -m unittest discover -s tests -p test_docker_integration.py -v
 ```
 
-The default suite uses fake APIs/scripted agents and real local Git. It tests changed input,
-independent review, repair limits, recovery, reconciliation, schedules, context budgets,
-HTTP retries, and protected paths. It inspects Docker arguments using mocks.
-The separate opt-in test runs real Go test/race/vet as the container user, compiles a binary
-larger than 64 KiB, checks persistent isolated caches, and verifies read-only mounts.
-An explicitly requested Docker test fails if its engine/image build is unavailable.
+The first command runs the normal tests. They use scripted stand-ins for the AIs, Jira and
+GitHub, but real Git. They cover the whole flow: questions, changed requirements, the
+coder/reviewer conversation and escalation to you, ticket assignment, restarts, retries,
+and protected files.
+
+The second command needs Docker. It builds a real Go sandbox and checks that Go builds and
+tests actually run inside it, with no network and read-only Git. If you ask for it and
+Docker is not running, it fails rather than quietly skipping.
 
 ## Current limits
 
-- This is a demo candidate, not a production-proven autonomous engineer. A controlled live
-  Jira/GitHub/model pilot and representative ticket evaluations are still needed.
-- Reviewer findings are strings. There is no stable finding ledger, two-pass rebuttal
-  reconciliation, or separate advisory-note schema; valid disagreements may consume rounds.
-- New profiles check gofmt, build, test, race test, and vet. Existing profiles retain their
-  configured commands; update them deliberately. Formatting excludes root vendor/, testdata/
-  directories, and hidden paths, but can still expose preexisting problems in project source.
-  No baseline comparison, automatic dependency-tidy policy, or extra linter is implemented.
-- The base branch is fetched when creating a ticket workspace, not rebased automatically
-  during repairs. Reconcile a stale base/conflicts manually and reverify/review changed code.
-- Model sessions restart after interruption. Message history is bounded with recoverable
-  observations, while canonical task input remains intact or fails explicitly if oversized.
-  Limits exclude system/tool-schema overhead; there is no hard dollar budget or prompt cache.
-- Reads use bounded transient retries. Writes are not blindly retried; known operations
-  reconcile by stable identifiers where supported. Jira, GitHub, and SQLite are not atomic;
-  no distributed exactly-once guarantee is claimed.
-  Successful work/PR polls reset consecutive remote failures; sustained failures still block
-  after the configured budget. GitHub secondary limits defer retries with increasing waits.
-- Docker uses no network/credentials, read-only root/Git metadata, nonroot execution and
-  resource limits. It is not a security guarantee against hostile repositories or kernel exploits.
-  Source-controlled secrets remain readable. Ticket/code context is sent to the model provider.
-- Workspaces, caches, SQLite, logs, and traces contain private data and grow until cleaned.
-  Stop the worker before archiving/removing state. No automatic cache quota/retention policy exists.
-- External PR branch changes block the agent for reconciliation. Merged/closed runs do not reopen.
-  Jira attachments/external links are not fetched; rich text extraction is basic.
-- A superseded API request may still complete and incur costs. Guard checks cannot undo a
-  remote write already sent. New input observed after a human merge is reported as follow-up work.
+Honest list of what this does **not** do yet:
+
+- **Not proven on real work.** No live trial with real Jira, GitHub and models has been run,
+  and there is no measured success rate on real tickets yet.
+- **The AIs can still be wrong.** TicketForge forces the coder and reviewer to answer every
+  point with evidence, but the quality of that evidence depends on the models. Services that
+  copy the OpenAI format differ in how well they support tool calling.
+- **Checks, not a baseline.** New profiles check formatting, build, tests, race tests and vet
+  (skipping `vendor/`, `testdata/` and hidden folders). If your main branch already fails a
+  check, every ticket will fail it too; there is no "it was already broken" comparison.
+- **No automatic rebase.** The branch starts from `main` when the ticket starts. If `main`
+  moves on and conflicts, you resolve it.
+- **The AI forgets between runs.** Each run rebuilds what it knows from the ticket and the
+  code. Long conversations are trimmed (big outputs are stored and can be re-read). There is
+  no spending limit in dollars and no prompt caching yet.
+- **Retries are careful, not magic.** Reads and AI calls are retried after short failures.
+  Writes (comments, pull requests) are checked first instead of blindly repeated. Jira,
+  GitHub and the local database cannot be updated as one unit, so in rare failures you might
+  see a delayed or duplicate-looking status comment, never a duplicate pull request.
+- **Docker is a strong fence, not a vault.** No network, no passwords, read-only system and
+  Git files. It does not protect against a deliberately hostile repository or kernel bugs.
+  Secrets committed in the repository are visible to the AI. Ticket and code text is sent to
+  the AI service you configure.
+- **Local data grows.** Workspaces, caches, the database, logs and traces stay on disk and
+  contain private code. Clean them up yourself (stop the worker first).
+- **Some things stay manual.** If someone else pushes to the agent's branch, it stops and
+  waits for you. Merged or closed tickets do not reopen; create a new ticket. Jira
+  attachments are not read.
+- **Work in flight cannot be recalled.** An AI request already sent still finishes and is
+  billed, even if you changed the ticket meanwhile; its result is then discarded.
 
 See [architecture](docs/architecture.md), [review status](docs/release-readiness.md), and
 [historical landscape/review](docs/landscape-and-review.md).

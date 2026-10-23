@@ -33,8 +33,8 @@ class ContextTests(unittest.TestCase):
 
     def test_agent_can_recover_full_archived_evidence_in_chunks(self):
         agents = Agents.__new__(Agents)
-        agents.cfg = SimpleNamespace(max_agent_steps=5, max_input_chars=6000, max_output_tokens=1000,
-                                     coder_model="coder", reviewer_model="reviewer")
+        agents.cfg = SimpleNamespace(max_agent_steps=5, max_input_chars=6000, max_output_tokens=1000, reviewer_max_output_tokens=1000,
+                                     coder_model="coder", reviewer_model="reviewer", coder_provider="anthropic", reviewer_provider="anthropic")
         agents.skill_root = Path(__file__).resolve().parents[1] / "ticketforge" / "skills"
         agents.sandbox = SimpleNamespace(run=lambda *a, **kw: {"exit_code": 1, "output": "x" * 22000 + "IMPORTANT_END"})
         requests = []
@@ -43,9 +43,9 @@ class ContextTests(unittest.TestCase):
             n = len(requests)
             name, args = ("shell", {"command": "go test ./..."}) if n == 1 else (
                 ("read_observation", {"id": "obs-0-1", "offset": 22000}) if n == 2 else
-                ("finish", {"status": "blocked", "summary": "Known failing check", "questions": [], "findings": []}))
+                ("finish", {"status": "blocked", "summary": "Known failing check", "questions": [], "responses": []}))
             return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": str(n), "name": name, "input": args}]}
-        agents.http = SimpleNamespace(call=call)
+        agents.clients = {"anthropic": SimpleNamespace(call=call)}
         result = agents.run("coder", Path("/unused"), {"specification": "Keep requirements intact"}, lambda: None, lambda e: None)
         self.assertEqual(result["status"], "blocked")
         self.assertTrue(all(size(r["messages"]) <= 6000 for r in requests))

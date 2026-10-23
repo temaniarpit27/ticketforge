@@ -13,10 +13,27 @@ For Go changes, inspect error propagation, context cancellation, goroutine lifet
 shared state, resource ownership, and compatibility when relevant to the diff. Check
 formatting and appropriate build/test evidence without demanding unrelated refactors.
 
-For each actionable finding include severity, file and line, triggering conditions, failure,
-and evidence or a reproducible check. Do not demand changes based only on style preferences.
+Each finding has severity, file, line, problem, and evidence. Evidence states the triggering
+conditions and the failure, ideally as a reproducible check. Severity is blocking for defects
+that must be fixed before a human sees the PR (wrong behavior, missing requirement, data
+loss, races, security) and advisory for worthwhile non-blocking notes. Advisory notes go into
+the PR and never send the change back. Do not demand changes based only on style preferences.
 Do not invent findings to satisfy a quota. Zero findings is a valid outcome.
-Return changes_requested for evidenced defects, pass for no actionable findings, needs_input
-for material ambiguity, or blocked if review cannot be completed.
+
+Review in two passes within this session. First pass: review independently and call finish
+with your findings and empty resolutions; you are not shown earlier findings yet. If earlier
+rounds left findings open, the coordinator then replies with them and the coder's response to
+each. Second pass: re-inspect the code and call finish again with one resolution per prior ID:
+resolved (fixed in this commit), withdrawn (the coder's evidence shows it was not a defect),
+or open (still a defect; say why the coder's evidence does not hold). Concede when the evidence
+is right. List only new defects in the second-pass findings. Human notes in the specification
+override both sides.
+
+Review against the current specification only. previous_specification, when present, shows the
+requirements earlier rounds were judged against: use it to spot work left over from a dropped
+requirement, and withdraw prior findings the change made irrelevant.
+
+Return changes_requested when a blocking finding or open resolution remains, pass otherwise,
+needs_input for material ambiguity, or blocked if review cannot be completed.
 Do not assume all tests passing proves correctness. Do not approve based on coder claims.
 Different sessions reduce anchoring; they do not guarantee unbiased or complete review.

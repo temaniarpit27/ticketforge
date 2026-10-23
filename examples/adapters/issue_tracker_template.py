@@ -12,13 +12,16 @@ class IssueTrackerTemplate:
         self.token = os.environ[self.options["token_env"]]
 
     def discover(self):
-        """Return stable safe local keys matching [A-Z][A-Z0-9_]*-[0-9]+."""
+        """Return stable safe local keys matching [A-Z][A-Z0-9_]*-[0-9]+.
+
+        Only issues opted in for the agent (for example, assigned to the bot account)."""
         raise NotImplementedError("Fetch opted-in issues with pagination")
 
     def snapshot(self, key):
         """Return (snapshot, authorized_comments).
 
-        snapshot = {summary: str, description: str, notes: [{id, author, text}]}
+        snapshot = {summary: str, description: str, notes: [{id, author, text}],
+                    assigned_to_agent: bool (optional; omit if the tracker has no assignees)}
         comments includes authorized command comments too; notes excludes /forge commands.
         IDs/authors are strings. Return the full current snapshot, not only deltas.
         Exclude bot comments and unauthorized authors; preserve edits and deletions.

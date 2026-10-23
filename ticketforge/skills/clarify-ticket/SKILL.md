@@ -18,5 +18,7 @@ scope, security, or acceptance criteria. Investigate code before asking question
 You may ask questions during implementation; do not silently invent product decisions.
 Return needs_input with questions when blocked. The coordinator posts them to Jira and
 resumes you after a human response. Do not directly contact Jira or other services.
-The newest specification supersedes conflicting old assumptions. Preserve useful work,
+The newest specification supersedes conflicting old assumptions. When previous_specification
+is present, start from what changed between it and the current one, and ask only about the
+change if it is ambiguous. Preserve useful work,
 but inspect the actual workspace rather than trusting a previous summary.

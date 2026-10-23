@@ -12,9 +12,9 @@ import time
 import uuid
 from pathlib import Path
 
-from .config import Config, secret
-from .integrations import HTTP
-from .context import bounded_messages, ContextBudgetError
+from . import models, review
+from .config import Config, provider_specs
+from .context import ContextBudgetError
 
 
 class ExecutionError(Exception):
@@ -22,7 +22,8 @@ class ExecutionError(Exception):
 
 
 def process(args, *, cwd=None, timeout=120, env=None, check=True, cancelled=lambda: None):
-    """No host shell. Bounded output, cancellation, and process-group cleanup."""
+    """Run a program (never through a shell), with a time limit, an output limit and a way
+    to cancel. On timeout or cancel the whole process group is killed."""
     with tempfile.TemporaryFile() as output:
         child = subprocess.Popen(args, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                  stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
@@ -56,6 +57,13 @@ def process(args, *, cwd=None, timeout=120, env=None, check=True, cancelled=lamb
 
 
 class Sandbox:
+    """Runs one shell command per short-lived Docker container.
+
+    No network, no credentials, read-only root and Git metadata, non-root user and resource
+    limits. Caches persist on the host per role so Go builds stay incremental without letting
+    the coder, reviewer and verifier share writable state.
+    """
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
@@ -116,6 +124,9 @@ class Sandbox:
 
 
 class Repository:
+    """Host-side Git: per-ticket checkouts, commits and pushes. Only the coordinator uses it;
+    agents never get Git credentials or writable Git metadata."""
+
     def __init__(self, cfg: Config, code_host=None):
         self.cfg = cfg
         self.code_host = code_host
@@ -146,6 +157,10 @@ class Repository:
         return context
 
     def prepare(self, key):
+        """Create (once) the coder checkout for a ticket on branch ticketforge/<key>.
+
+        Cloned in a staging directory and renamed into place, so a crash never leaves a
+        half-initialised workspace. refs/ticketforge/base remembers where the work started."""
         workspace = self.root / key / "coder"
         branch = "ticketforge/" + key.lower()
         if not (workspace / ".git").exists():
@@ -165,6 +180,10 @@ class Repository:
         return workspace, branch
 
     def commit(self, workspace, key, version):
+        """Commit everything the coder changed, after refusing operator-protected paths.
+
+        Returns (head, base). A round where the coder changed nothing keeps the previous
+        head; a ticket with no change at all is an error."""
         self.git("add", "--all", cwd=workspace)
         # Agent tools cannot modify Git metadata; coordinator owns commits and identity.
         paths = self.git("diff", "--cached", "--name-only", "-z", cwd=workspace).split("\0")
@@ -189,6 +208,7 @@ class Repository:
         return head, base
 
     def review_workspace(self, key, workspace, head, version):
+        """Fresh throwaway clone at the fixed commit; reviewer edits never reach the PR."""
         # A fresh clone for every review avoids test artifacts and previous review modifications.
         dest = self.root / key / f"review-v{version}-{head[:12]}-{uuid.uuid4().hex[:8]}"
         self.git("clone", "--no-hardlinks", "--no-local", str(workspace), str(dest))
@@ -199,6 +219,7 @@ class Repository:
         self.git("push", "origin", f"HEAD:refs/heads/{branch}", cwd=workspace)
 
 
+# Tools every role gets. finish is added per role with that role's result schema.
 TOOLS = [{"name": "shell", "description": "Run a shell command inside the isolated repository container. No network or service credentials. Git metadata is read-only. Output is bounded.",
           "input_schema": {"type": "object", "properties": {"command": {"type": "string"}},
                            "required": ["command"], "additionalProperties": False}},
@@ -208,13 +229,33 @@ TOOLS = [{"name": "shell", "description": "Run a shell command inside the isolat
 
 
 class Agents:
-    def __init__(self, cfg: Config, sandbox: Sandbox):
+    """Runs one role (assessor, coder or reviewer) as a fresh tool-calling conversation.
+
+    The loop is provider-neutral: models.py turns each provider's API into normalized tool
+    calls, so any configured model can play any role, including the same model for both.
+    """
+
+    def __init__(self, cfg: Config, sandbox: Sandbox, clients=None):
         self.cfg, self.sandbox = cfg, sandbox
-        self.http = HTTP("https://api.anthropic.com", {
-            "x-api-key": secret("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01"}, cfg.http_max_attempts)
+        specs = provider_specs(cfg)
+        # One HTTP client per provider in use (coder and reviewer may share one); keys stay on the host.
+        self.clients = clients or {p: models.client(specs[p], cfg.http_max_attempts)
+                                   for p in dict.fromkeys((cfg.coder_provider, cfg.reviewer_provider))}
         self.skill_root = Path(__file__).parent / "skills"
 
-    def run(self, role, workspace, task, guard, trace):
+    def session(self, role, system, tools, task):
+        # The assessor is the coder's planning phase, so it uses the coder's provider and model.
+        reviewer = role == "reviewer"
+        provider = self.cfg.reviewer_provider if reviewer else self.cfg.coder_provider
+        model = self.cfg.reviewer_model if reviewer else self.cfg.coder_model
+        max_tokens = self.cfg.reviewer_max_output_tokens if reviewer else self.cfg.max_output_tokens
+        spec = provider_specs(self.cfg)[provider]
+        return models.SESSIONS[spec["api"]](self.clients[provider], model, system, tools, task, max_tokens,
+                                            self.cfg.max_input_chars, spec)
+
+    def run(self, role, workspace, task, guard, trace, on_finish=None):
+        """Run one role until it calls finish. on_finish may reject a result (ValueError) or
+        reply with follow-up instructions (a dict) to continue the same conversation."""
         reviewer = role == "reviewer"
         assessing = role == "assessor"
         names = ["review-change"] if reviewer else (["clarify-ticket"] if assessing else ["clarify-ticket", "implement-change"])
@@ -226,55 +267,45 @@ class Agents:
                   "Do not ask routine questions answerable from code. Finish only via the finish tool.\n\n" + skills)
         if assessing:
             system += "\nThis is the read-only assessment phase: inspect the task and source, ask material questions, and return ready with your plan/assumptions in summary when actionable. Do not implement. ready does not mean coding is complete."
-        schema = {"type": "object", "properties": {
-            "status": {"type": "string", "enum": ["pass", "changes_requested", "needs_input", "blocked"] if reviewer else ["ready", "needs_input", "blocked"]},
-            "summary": {"type": "string"},
-            "questions": {"type": "array", "items": {"type": "string"}},
-            "findings": {"type": "array", "items": {"type": "string"}},
-        }, "required": ["status", "summary", "questions", "findings"], "additionalProperties": False}
-        tools = TOOLS + [{"name": "finish", "description": "Submit final structured result. Include concrete evidence in findings. Do not combine with other tool calls.", "input_schema": schema}]
-        messages = [{"role": "user", "content": json.dumps(task, ensure_ascii=False)}]
+        tools = TOOLS + [{"name": "finish", "description": "Submit final structured result. Include concrete evidence. Do not combine with other tool calls.",
+                          "input_schema": review.finish_schema(role)}]
+        try:
+            session = self.session(role, system, tools, json.dumps(task, ensure_ascii=False))
+        except KeyError as exc:
+            raise ExecutionError(f"Model provider is not configured: {exc}") from None
+        # Full tool outputs, kept so compacted history can still be read back on demand.
         observations = {}
         for step in range(self.cfg.max_agent_steps):
             guard()
             try:
-                view = bounded_messages(messages, self.cfg.max_input_chars)
+                turn = session.step(guard)
             except ContextBudgetError as exc:
                 raise ExecutionError(str(exc)) from exc
-            result = self.http.call("POST", "/v1/messages", {
-                "model": self.cfg.reviewer_model if reviewer else self.cfg.coder_model,
-                "max_tokens": self.cfg.max_output_tokens, "system": system, "tools": tools, "messages": view}, guard=guard)
             guard()
-            content = result.get("content", [])
-            if result.get("stop_reason") in ("max_tokens", "refusal"):
-                raise ExecutionError("Model response truncated or refused; no completion accepted")
-            trace({"role": role, "step": step, "response": result})
-            calls = [b for b in content if b.get("type") == "tool_use"]
+            if turn.stopped:
+                raise ExecutionError(f"Model response {turn.stopped}; no completion accepted")
+            trace({"role": role, "step": step, "response": turn.raw})
+            calls = turn.calls
             if not calls:
                 raise ExecutionError("Agent stopped without a structured finish result")
-            messages.append({"role": "assistant", "content": content})
             outputs = []
             for call in calls:
                 guard()
-                args = call.get("input", {})
+                args = call["input"]
                 try:
+                    if not isinstance(args, dict):
+                        raise ValueError("Tool arguments must be a JSON object")
                     if call["name"] == "finish":
                         if len(calls) != 1:
                             raise ValueError("finish must be the only tool call")
-                        if set(args) != set(schema["required"]) or args.get("status") not in schema["properties"]["status"]["enum"]:
-                            raise ValueError("Invalid finish result")
-                        if not isinstance(args["summary"], str) or any(not isinstance(args[k], list) or
-                                any(not isinstance(v, str) for v in args[k]) for k in ("questions", "findings")):
-                            raise ValueError("Invalid finish field types")
-                        if args["status"] == "needs_input" and not args["questions"]:
-                            raise ValueError("needs_input requires concrete questions")
-                        if args["status"] == "changes_requested" and not args["findings"]:
-                            raise ValueError("changes_requested requires findings")
-                        if args["status"] in ("ready", "pass") and args["questions"]:
-                            raise ValueError("Unanswered questions require needs_input")
-                        if reviewer and args["status"] == "pass" and args["findings"]:
-                            raise ValueError("A passing review cannot contain unresolved findings")
-                        return args
+                        # Invalid results go back to the model as a tool error to fix, not a crash.
+                        review.validate_finish(role, args)
+                        reply = on_finish(args) if on_finish else None
+                        if reply is None:
+                            return args
+                        trace({"role": role, "step": step, "coordinator_reply": reply})
+                        outputs.append({"id": call["id"], "content": json.dumps(reply), "is_error": False})
+                        continue
                     if call["name"] == "read_observation":
                         if set(args) != {"id", "offset"} or args["id"] not in observations or type(args["offset"]) is not int or args["offset"] < 0:
                             raise ValueError("Unknown observation or invalid offset")
@@ -289,8 +320,8 @@ class Agents:
                     observations[identity] = json.dumps(value)
                     value = {**value, "observation_id": identity}
                     trace({"role": role, "step": step, "tool": call["name"], "result": value})
-                    outputs.append({"type": "tool_result", "tool_use_id": call["id"], "content": json.dumps(value)})
+                    outputs.append({"id": call["id"], "content": json.dumps(value), "is_error": False})
                 except (ValueError, ExecutionError) as exc:
-                    outputs.append({"type": "tool_result", "tool_use_id": call["id"], "is_error": True, "content": str(exc)})
-            messages.append({"role": "user", "content": outputs})
+                    outputs.append({"id": call["id"], "content": str(exc), "is_error": True})
+            session.respond(outputs)
         raise ExecutionError("Agent step limit reached")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import random
+import re
 import time
 from email.utils import parsedate_to_datetime
 import urllib.error
@@ -28,11 +29,20 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 class HTTP:
-    def __init__(self, base, headers, max_attempts=3, sleeper=time.sleep):
+    """Small JSON client. Refuses redirects, caps response size, and never copies the
+    server's error text into our errors (it may contain private data).
+
+    Reads (GET) and AI calls are retried after short failures, waiting a bit longer each
+    time. Other writes are never simply repeated: if the answer was lost, the write may
+    already have happened, so callers check first instead."""
+
+    def __init__(self, base, headers, max_attempts=3, sleeper=time.sleep, *, retryable_posts=(), timeout=90):
         self.base = base.rstrip("/")
         self.headers = headers
         self.opener = urllib.request.build_opener(NoRedirect)
         self.max_attempts, self.sleep = max_attempts, sleeper
+        # POSTs that are safe to repeat because they change nothing outside (AI calls).
+        self.retryable_posts, self.timeout = frozenset(retryable_posts), timeout
 
     def wait(self, delay, guard):
         while delay > 0:
@@ -46,12 +56,12 @@ class HTTP:
         raw = None if body is None else json.dumps(body).encode()
         request = urllib.request.Request(self.base + path, raw, method=method,
                                          headers={"Content-Type": "application/json", **self.headers})
-        retryable_call = method == "GET" or (method == "POST" and self.base == "https://api.anthropic.com" and path == "/v1/messages")
+        retryable_call = method == "GET" or (method == "POST" and path in self.retryable_posts)
         for attempt in range(self.max_attempts if retryable_call else 1):
             guard()
             delay = min(30, 2 ** attempt + random.random())
             try:
-                with self.opener.open(request, timeout=90) as response:
+                with self.opener.open(request, timeout=self.timeout) as response:
                     result = response.read(8 * 1024 * 1024 + 1)
                     if len(result) > 8 * 1024 * 1024:
                         raise RemoteError("API response exceeds size limit")
@@ -98,6 +108,20 @@ class HTTP:
             self.wait(delay, guard)
 
 
+# Snapshot key reporting whether the ticket is assigned to the agent. It is not part of the
+# specification: the store removes it before versioning so reassignment never looks like new input.
+ASSIGNED = "assigned_to_agent"
+
+
+def assigned_jql(jql, account_id):
+    """Restrict a JQL filter to issues assigned to the agent, keeping any ORDER BY clause."""
+    if not re.fullmatch(r"[A-Za-z0-9:_-]+", account_id):
+        raise ValueError("Unexpected Jira account ID format")
+    match = re.search(r"\s+ORDER\s+BY\s+.*$", jql, flags=re.IGNORECASE | re.DOTALL)
+    query, order = (jql[:match.start()], match.group(0)) if match else (jql, "")
+    return f'({query.strip()}) AND assignee = "{account_id}"{order}'
+
+
 def adf_text(value):
     if isinstance(value, str):
         return value
@@ -113,6 +137,23 @@ def adf_text(value):
     return text + ("\n" if value.get("type") in ("paragraph", "heading", "listItem") else "")
 
 
+def field_text(value):
+    """Plain text for any Jira field value: rich text, option, user, list, number or empty."""
+    if value is None:
+        return ""
+    if isinstance(value, dict) and value.get("type") == "doc":
+        return adf_text(value).strip()
+    if isinstance(value, dict):
+        # Select options use "value"; users, versions and components use "name"/"displayName".
+        for name in ("value", "name", "displayName"):
+            if name in value:
+                return str(value[name])
+        return json.dumps(value, sort_keys=True)
+    if isinstance(value, list):
+        return ", ".join(field_text(v) for v in value)
+    return str(value)
+
+
 def to_adf(text):
     return {"type": "doc", "version": 1, "content": [
         {"type": "paragraph", "content": [{"type": "text", "text": line}]} if line else
@@ -121,6 +162,10 @@ def to_adf(text):
 
 
 class Jira:
+    """Jira Cloud: finds tickets (your JQL, limited to ones assigned to the bot), reads them,
+    and posts comments without duplicates. Only comments by allowed_jira_accounts count as
+    instructions; the bot's own comments are ignored."""
+
     def issue_url(self, key):
         return self.cfg.jira_url.rstrip("/") + "/browse/" + key
 
@@ -132,10 +177,16 @@ class Jira:
         if self.bot in cfg.allowed_jira_accounts:
             raise ValueError("Use a separate Jira bot account; it cannot be an authorized human")
 
+    def discovery_jql(self):
+        if not self.cfg.require_agent_assignment:
+            return self.cfg.jira_jql
+        return assigned_jql(self.cfg.jira_jql, self.bot)
+
     def discover(self):
         keys, token = [], None
+        jql = self.discovery_jql()
         while True:
-            body = {"jql": self.cfg.jira_jql, "fields": ["summary"], "maxResults": 100}
+            body = {"jql": jql, "fields": ["summary"], "maxResults": 100}
             if token:
                 body["nextPageToken"] = token
             page = self.http.call("POST", "/rest/api/3/search/jql", body)
@@ -155,7 +206,10 @@ class Jira:
                 return values
 
     def snapshot(self, key):
-        fields = self.http.call("GET", f"/rest/api/3/issue/{key}?fields=summary,description")["fields"]
+        extra = list(getattr(self.cfg, "jira_spec_fields", None) or [])
+        names = ",".join(["summary", "description", "assignee", *extra])
+        fields = self.http.call("GET", f"/rest/api/3/issue/{key}?fields={names}")["fields"]
+        assignee = (fields.get("assignee") or {}).get("accountId")
         comments = []
         for c in self.comments(key):
             author = c.get("author", {}).get("accountId")
@@ -163,12 +217,18 @@ class Jira:
                 continue
             comments.append({"id": str(c["id"]), "author": author, "text": adf_text(c.get("body", "")).strip()})
         notes = [c for c in comments if not c["text"].startswith("/forge ")]
-        return {"summary": fields.get("summary", ""), "description": adf_text(fields.get("description")),
-                "notes": notes}, comments
+        snapshot = {"summary": fields.get("summary", ""), "description": adf_text(fields.get("description")),
+                    "notes": notes,
+                    ASSIGNED: assignee == self.bot or not self.cfg.require_agent_assignment}
+        if extra:
+            # Only added when configured, so upgrading never makes existing tickets look changed.
+            snapshot["fields"] = {name: field_text(fields.get(name)) for name in extra}
+        return snapshot, comments
 
     def post_once(self, key, identity, body):
         marker = f"[ticketforge:{identity}]"
-        # Reconcile before a POST, including after an uncertain previous response.
+        # Check first whether this comment is already there (an earlier send may have worked
+        # even though we never saw the answer), so it is never posted twice.
         if any(c.get("author", {}).get("accountId") == self.bot and marker in adf_text(c.get("body"))
                for c in self.comments(key)):
             return
@@ -181,6 +241,8 @@ class Jira:
 
 
 class GitHub:
+    """GitHub code host: PRs, checks and reviews, observed only. There is no merge method."""
+
     def git_remote(self):
         return f"https://github.com/{self.cfg.github_repo}.git"
 

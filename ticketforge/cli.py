@@ -54,13 +54,15 @@ def main():
         return
     from .adapters import language_adapter
     context = language_adapter(cfg.language).inspect(Path(cfg.repo)) if args.command == "doctor" else None
-    for name in ("JIRA_EMAIL", "JIRA_API_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY"):
+    for name in cfg.required_secrets():
         secret(name)
     sandbox = Sandbox(cfg)
     probe = sandbox.check()
     if args.command == "doctor":
         print("Local configuration, credential presence, Docker engine, and sandbox image checks passed.")
         print(f"Go repository: {context['module']}; declared Go {context['go_version']}")
+        # Show who plays each role, so a misconfigured profile is obvious before serving.
+        print(f"Coder: {cfg.coder_provider}/{cfg.coder_model}; reviewer: {cfg.reviewer_provider}/{cfg.reviewer_model}")
         print(probe["output"].strip())
         print("Credentials and remote permissions have not been validated. No remote changes were made.")
         return

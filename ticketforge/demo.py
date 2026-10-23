@@ -10,7 +10,9 @@ import tempfile
 from pathlib import Path
 
 from .config import Config
+from .integrations import ASSIGNED
 from .coordinator import Coordinator
+from .review import validate_finish
 from .runtime import Repository, process
 from .store import Store
 
@@ -25,6 +27,7 @@ class DemoJira:
     def __init__(self):
         self.description = "Implement shipping_cost(subtotal). Charge 10 below the free-shipping threshold and 0 at or above it."
         self.human = []
+        self.assigned = True
         self.posts = []
         self.links = []
 
@@ -36,7 +39,8 @@ class DemoJira:
 
     def snapshot(self, key):
         return {"summary": "Implement shipping cost", "description": self.description,
-                "notes": copy.deepcopy([c for c in self.human if not c["text"].startswith("/forge ")])}, copy.deepcopy(self.human)
+                "notes": copy.deepcopy([c for c in self.human if not c["text"].startswith("/forge ")]),
+                ASSIGNED: self.assigned}, copy.deepcopy(self.human)
 
     def post_once(self, key, identity, body):
         if not any(p["id"] == identity for p in self.posts):
@@ -111,19 +115,34 @@ class DemoAgents:
     def __init__(self):
         self.calls = []
 
-    def run(self, role, workspace, task, guard, trace):
+    def finish(self, role, result, on_finish, reconcile=None):
+        # Same validation and coordinator hook as the real agent loop.
+        validate_finish(role, result)
+        reply = on_finish(result) if on_finish else None
+        if reply is None:
+            return result
+        final = reconcile(reply)
+        validate_finish(role, final)
+        if on_finish(final) is not None:
+            raise ValueError("Coordinator asked for a second reconciliation")
+        return final
+
+    def run(self, role, workspace, task, guard, trace, on_finish=None):
         guard()
         self.calls.append({"role": role, "workspace": str(workspace), "task": copy.deepcopy(task)})
         notes = task["specification"]["notes"]
-        result = {"summary": "Implemented threshold behavior and verified boundary cases.", "questions": [], "findings": []}
+        result = {"summary": "Implemented threshold behavior and verified boundary cases.", "questions": []}
         if not notes:
-            return {**result, "status": "needs_input", "questions": ["What subtotal qualifies for free shipping?"]}
+            question = {**result, "status": "needs_input", "questions": ["What subtotal qualifies for free shipping?"]}
+            question.update({"coder": {"responses": []}, "reviewer": {"findings": [], "resolutions": []}}.get(role, {}))
+            return question
         threshold = 150 if any("150" in n["text"] for n in notes) else 100
         if role == "assessor":
-            return {**result, "status": "ready", "summary": f"Implement an inclusive threshold of {threshold}; test below, at, and above it."}
+            return self.finish(role, {**result, "status": "ready", "summary": f"Implement an inclusive threshold of {threshold}; test below, at, and above it."}, on_finish)
         if role == "coder":
             # First attempt deliberately has a boundary bug; independent review catches it.
-            operator = ">=" if task.get("review_findings_or_failed_checks") or threshold == 150 else ">"
+            open_findings = task.get("open_findings", [])
+            operator = ">=" if open_findings or threshold == 150 else ">"
             (workspace / "shipping.py").write_text(f"def shipping_cost(subtotal):\n    return 0 if subtotal {operator} {threshold} else 10\n")
             if operator == ">=":
                 (workspace / "tests" / "test_shipping.py").write_text(
@@ -131,12 +150,23 @@ class DemoAgents:
                     f"    def test_below(self): self.assertEqual(shipping_cost({threshold - 1}), 10)\n"
                     f"    def test_boundary(self): self.assertEqual(shipping_cost({threshold}), 0)\n"
                     f"    def test_above(self): self.assertEqual(shipping_cost({threshold + 1}), 0)\n")
-            return {**result, "status": "ready"}
+            responses = [{"id": f["id"], "action": "fixed", "evidence": "Inclusive comparison; boundary test added."} for f in open_findings]
+            return self.finish(role, {**result, "status": "ready", "responses": responses}, on_finish)
         code = (workspace / "shipping.py").read_text()
-        if " >= " not in code:
-            return {**result, "status": "changes_requested", "findings": [
-                f"[P1] shipping.py:2 — subtotal exactly {threshold} is charged 10, but the requirement says free at the threshold. Use an inclusive comparison and test the boundary."]}
-        return {**result, "status": "pass"}
+        inclusive = " >= " in code
+        findings = [] if inclusive else [{
+            "severity": "blocking", "file": "shipping.py", "line": 2,
+            "problem": f"subtotal exactly {threshold} is charged 10, but the requirement says free at the threshold.",
+            "evidence": f"shipping_cost({threshold}) returns 10; use an inclusive comparison and test the boundary."}]
+        first = {**result, "status": "pass" if inclusive else "changes_requested", "findings": findings, "resolutions": []}
+
+        def reconcile(reply):
+            resolutions = [{"id": f["id"], "status": "resolved" if inclusive else "open",
+                            "evidence": "Boundary now free." if inclusive else "Still exclusive."} for f in reply["prior_findings"]]
+            # The independent finding duplicates a prior one, so it is not listed again.
+            return {**result, "status": "pass" if inclusive else "changes_requested", "findings": [], "resolutions": resolutions}
+
+        return self.finish(role, first, on_finish, reconcile)
 
 
 def fixture(root):

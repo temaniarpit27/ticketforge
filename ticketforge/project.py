@@ -136,7 +136,7 @@ def init_profile(repo: Path, directory: Path, github_repo=None):
     cfg = Config(repo=str(repo), jira_url="https://your-company.atlassian.net",
                  jira_jql="project = APP AND labels = ticketforge ORDER BY created ASC",
                  allowed_jira_accounts=["replace-with-your-human-jira-account-id"], github_repo=github_repo,
-                 coder_model="replace-with-your-anthropic-model-id", reviewer_model="replace-with-your-anthropic-model-id",
+                 coder_model="replace-with-a-model-id-from-coder_provider", reviewer_model="replace-with-a-model-id-from-reviewer_provider",
                  base_branch=base_branch, sandbox_image="ticketforge-" + re.sub(r"[^a-z0-9_.-]", "-", repo.name.lower()) + ":local",
                  project_guide="PROJECT.md",
                  verification_commands=GoAdapter().verification_commands(),
@@ -146,5 +146,6 @@ def init_profile(repo: Path, directory: Path, github_repo=None):
     (directory / "Dockerfile.sandbox").write_text(go_dockerfile(context, (repo / "go.sum").is_file()))
     (directory / "PROJECT.md").write_text(guide_template(context))
     (directory / "discovered-context.json").write_text(json.dumps(context, indent=2) + "\n")
-    (directory / ".env.example").write_text("JIRA_EMAIL=\nJIRA_API_TOKEN=\nGITHUB_TOKEN=\nANTHROPIC_API_KEY=\n")
+    (directory / ".env.example").write_text("JIRA_EMAIL=\nJIRA_API_TOKEN=\nGITHUB_TOKEN=\nANTHROPIC_API_KEY=\n"
+                                            "# Only needed when a role uses the openai provider.\nOPENAI_API_KEY=\n")
     return cfg, context
