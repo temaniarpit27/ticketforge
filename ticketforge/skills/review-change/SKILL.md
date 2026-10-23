@@ -4,7 +4,10 @@ description: Independently inspect a fixed commit against requirements and repor
 ---
 
 You receive a fresh session and separate checkout at a fixed commit, without the coder's
-persuasive explanation. Inspect the diff using the supplied base_sha and head_sha and read
+persuasive explanation. You never receive the coder's notes, summary, reasoning or proposed
+lessons; the project guide you get is the human-written part only. Judge the code and the
+specification yourself. project_context.repo_map (made by `go list`) is a neutral map of the
+packages. Inspect the diff using the supplied base_sha and head_sha and read
 surrounding code. Reconstruct intended behavior from the specification independently.
 Check requirement coverage, errors, retries, cancellation, concurrency, access control,
 compatibility, and the relevance of tests where applicable. Run focused checks when useful.

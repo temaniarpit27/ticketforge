@@ -3,15 +3,34 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from pathlib import Path
 
 from . import review
+from .adapters import language_adapter
+from .project import REPO_MAP_FILE
+from .runtime import LEARNED_HEADING, ExecutionError
 from .store import FINISHED_STATES, Store, Superseded
 from .integrations import RateLimited, RemoteError
 
 log = logging.getLogger(__name__)
+
+
+def save_lessons(path, key, lessons):
+    """Append approved lessons to the project guide under one heading, one line each."""
+    heading = LEARNED_HEADING
+    text = path.read_text() if path.is_file() else ""
+    if heading not in text:
+        text = text.rstrip("\n") + ("\n\n" if text else "") + heading + "\n\n"
+    elif not text.endswith("\n"):
+        text += "\n"
+    text += "".join(f"- {' '.join(lesson.split())} ({key})\n" for lesson in lessons)
+    # Write to a temporary file first, so a crash never leaves a half-written guide.
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(text)
+    temporary.replace(path)
 
 
 class Coordinator:
@@ -116,7 +135,7 @@ class Coordinator:
         if ticket["data"].get("pr"):
             remote = self.github.pr(ticket["data"]["pr"])
             if remote.get("merged"):
-                self.store.merged(key, remote.get("merge_commit_sha"), remote["html_url"])
+                self.record_merge(key, remote.get("merge_commit_sha"), remote["html_url"])
                 return
             if remote["state"] != "open":
                 self.store.update(key, version, "closed", approval=None)
@@ -134,6 +153,10 @@ class Coordinator:
         self.flush()
         workspace, branch = self.repo.prepare(key)
         project_context = self.repo.context(workspace)
+        base = self.repo.git("rev-parse", "refs/ticketforge/base", cwd=workspace)
+        repo_map = self.repo_map(workspace, base, project_context)
+        if repo_map:
+            project_context["repo_map"] = repo_map
         self.store.update(key, version, project_context=project_context)
         self.post(key, f"context:{version}", f"Repository discovered: {project_context['language']}. " +
                   "Read the manifest, project structure, and available guides. Relevant source and tests will be inspected before changes.\n" +
@@ -158,6 +181,12 @@ class Coordinator:
         changed = self.changed_requirements(ticket)
         if changed:
             task["previous_specification"] = changed
+        # What has been done so far (commits, changed files) so the coder builds on it.
+        task["history"] = self.repo.history(workspace)
+        # The coder's own notes from its last round of this ticket, so it does not have to
+        # rediscover the code from scratch. The reviewer never sees them.
+        if ticket["data"].get("coder_notes"):
+            task["your_notes_from_last_round"] = ticket["data"]["coder_notes"]
         # Read-only planning once per specification version: cheap to correct, and questions
         # surface before any code exists. Later rounds of the same version reuse the plan.
         if ticket["data"].get("assessed_version") != version:
@@ -183,6 +212,8 @@ class Coordinator:
 
         coded = self.agents.run("coder", workspace, task, guard, tracer, on_finish=coder_finished)
         self.boundary(key, version)
+        # Kept even if the coder stops to ask a question: the next round starts from them.
+        self.store.update(key, version, coder_notes={"version": version, "round": round_number, "text": coded["notes"]})
         if self.result(key, version, "coder", coded):
             return
         # Save the coder's "fixed"/"disputed" answers now, so the reviewer still sees them
@@ -281,8 +312,12 @@ class Coordinator:
             return None
 
         reviewer_workspace = self.repo.review_workspace(key, workspace, head, version)
+        review_context = self.repo.context(reviewer_workspace, reviewer=True)
+        repo_map = self.repo_map(reviewer_workspace, base, review_context)
+        if repo_map:
+            review_context["repo_map"] = repo_map
         review_task = {"ticket": key, "specification_version": version, "specification": ticket["snapshot"],
-                       "project_context": self.repo.context(reviewer_workspace),
+                       "project_context": review_context,
                        "base_sha": base, "head_sha": head, "verification_commands": self.cfg.verification_commands}
         # Earlier findings may have been raised against older requirements; the reviewer needs
         # to know what changed to withdraw ones that no longer apply.
@@ -294,6 +329,38 @@ class Coordinator:
         if self.result(key, version, "reviewer", reviewed):
             return None
         return reviewed
+
+    def repo_map(self, workspace, base, project_context):
+        """A package map of the repository at the ticket's starting commit.
+
+        Made once per commit (by running `go list` in the sandbox) and saved, so every ticket
+        that starts from the same commit of the main branch gets it instantly. It saves the
+        agents from rediscovering the package layout with grep on every ticket and round.
+        Never blocks work: if it cannot be made, the agents simply explore as before.
+        """
+        # Only when discovery confirmed the configured language, and for a real commit.
+        if project_context.get("language") != self.cfg.language or not re.fullmatch(r"[0-9a-f]{40}", base or ""):
+            return None
+        saved = Path(self.cfg.state_dir) / "repo-maps" / f"{base}.json"
+        if saved.is_file():
+            repo_map = json.loads(saved.read_text())
+            return None if repo_map.get("unavailable") else repo_map
+        repo_map = {"unavailable": True}
+        try:
+            adapter = language_adapter(self.cfg.language)
+            result = self.sandbox.run(workspace, adapter.repo_map_command(), role="verify", read_only=True)
+            output = self.sandbox.cache_dir(workspace, "verify") / REPO_MAP_FILE
+            if result["exit_code"] == 0 and output.is_file() and output.stat().st_size <= 20 * 1024 * 1024:
+                repo_map = adapter.parse_repo_map(output.read_text(errors="replace"), project_context.get("module", ""))
+                repo_map["commit"] = base
+            if output.is_file():
+                output.unlink()
+        except (ValueError, OSError, ExecutionError):
+            log.warning("Repository map unavailable for %s; agents will explore without it", base)
+        # A failure is remembered too, so the same commit is not retried every round.
+        saved.parent.mkdir(parents=True, exist_ok=True)
+        saved.write_text(json.dumps(repo_map))
+        return None if repo_map.get("unavailable") else repo_map
 
     @staticmethod
     def changed_requirements(ticket):
@@ -309,14 +376,37 @@ class Coordinator:
         ticket = self.store.get(key)
         data, head = ticket["data"], ticket["data"]["head"]
         url = data["pr_url"]
+        lessons = data["coder_result"].get("lessons") or []
+        proposal = ("\n\nThe coder suggests remembering these facts about the repository for future tickets:\n" +
+                    "\n".join(f"{i + 1}. {lesson}" for i, lesson in enumerate(lessons)) +
+                    "\nReply /forge learn to keep all of them, or for example /forge learn 1,3 for some. "
+                    "They are added to the project guide (PROJECT.md) only after this PR is merged.") if lessons else ""
         self.post(key, f"pr:{version}:{head}",
                   f"PR raised: {url}\n\nIndependent review completed; configured local checks passed.\n"
                   f"Specification: v{version}\nCommit: {head}\n\n{data['coder_result']['summary']}\n\n"
                   "Please review and merge manually on GitHub. Request implementation changes on this ticket.\n\n"
-                  "New input requires fresh verification and agent review. TicketForge never approves or merges your PR.")
+                  "New input requires fresh verification and agent review. TicketForge never approves or merges your PR." +
+                  proposal)
         if data.get("jira_linked") != url:
             self.jira.link(key, url)
             self.store.update(key, version, jira_linked=url)
+
+    def record_merge(self, key, sha, url):
+        """Mark the ticket merged; then save any lessons you approved into the project guide.
+
+        Lessons are only kept for merged work, and only the ones a human approved on Jira,
+        because whatever is in the guide is read by every future agent run."""
+        self.store.merged(key, sha, url)
+        data = self.store.get(key)["data"]
+        approved = data.get("lessons_approved") or []
+        if not approved or data.get("lessons_saved"):
+            return
+        if not self.cfg.project_guide:
+            self.post(key, "lessons", "Approved notes were not saved: set project_guide in the profile to keep them.")
+            return
+        save_lessons(Path(self.cfg.project_guide), key, approved)
+        self.store.annotate(key, lessons_saved=True)
+        self.post(key, "lessons", f"Saved {len(approved)} note(s) to the project guide; future tickets will read them.")
 
     def check_merge(self, ticket):
         """Observe a waiting PR: report checks/reviews on Jira and detect the human's merge or
@@ -326,7 +416,7 @@ class Coordinator:
         self.announce_pr(key, version)
         pr = self.github.pr(data["pr"])
         if pr.get("merged"):
-            self.store.merged(key, pr.get("merge_commit_sha"), pr["html_url"])
+            self.record_merge(key, pr.get("merge_commit_sha"), pr["html_url"])
             return
         if pr["state"] != "open":
             self.store.update(key, version, "closed", approval=None)

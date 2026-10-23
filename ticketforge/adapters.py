@@ -26,6 +26,8 @@ class LanguageAdapter(Protocol):
     def inspect(self, root): ...
     def dockerfile(self, context, has_sum): ...
     def verification_commands(self): ...
+    def repo_map_command(self): ...
+    def parse_repo_map(self, text, module): ...
 
 
 class GoAdapter:
@@ -41,6 +43,16 @@ class GoAdapter:
         return ["tf_unformatted=$(find . -name '*.go' -not -path './vendor/*' -not -path '*/testdata/*' -not -path '*/.*' -exec gofmt -l {} +) && "
                 'if [ -n "$tf_unformatted" ]; then printf \'%s\\n\' "$tf_unformatted"; exit 1; fi',
                 "go build ./...", "go test ./...", "go test -race ./...", "go vet ./..."]
+
+
+    def repo_map_command(self):
+        """Shell command that writes the raw package list to /cache (see parse_repo_map)."""
+        from .project import REPO_MAP_COMMAND
+        return REPO_MAP_COMMAND
+
+    def parse_repo_map(self, text, module):
+        from .project import parse_repo_map
+        return parse_repo_map(text, module)
 
 
 LANGUAGES = {"go": GoAdapter}

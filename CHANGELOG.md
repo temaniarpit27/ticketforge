@@ -12,6 +12,11 @@
   OpenAI-compatible Chat Completions endpoint, including local servers. Coder and reviewer may share one.
 - Model call timeout is configurable per provider (default 600s, was a fixed 90s).
 - Only tickets assigned to the agent's Jira account are picked up; unassigning stops work.
+- Less rediscovery: a `go list` package map saved per starting commit; the coder's own notes
+  and the ticket's Git history passed to its next round; build caches shared across tickets
+  (per role). The coder may propose repository facts; `/forge learn` keeps them, and they are
+  appended to the profile's `PROJECT.md` only when the PR is merged.
+- The reviewer never receives coder-written text, including approved lessons.
 - One-ticket-at-a-time scheduling: the worker stays on its current ticket until it cannot
   continue, then takes the ready ticket that waited longest; the current ticket survives
   restarts. Merged, closed and unassigned tickets are no longer read from Jira on every poll.

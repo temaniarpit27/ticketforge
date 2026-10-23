@@ -10,3 +10,9 @@ class LanguageAdapterTemplate:
 
     def verification_commands(self):
         raise NotImplementedError("Return meaningful build/test/format checks for this language")
+
+    def repo_map_command(self):
+        raise NotImplementedError("Shell command writing a package/module listing to /cache")
+
+    def parse_repo_map(self, text, module):
+        raise NotImplementedError("Return {module, packages: [{package, doc, files, tests, imports}], truncated}")

@@ -43,7 +43,7 @@ class ContextTests(unittest.TestCase):
             n = len(requests)
             name, args = ("shell", {"command": "go test ./..."}) if n == 1 else (
                 ("read_observation", {"id": "obs-0-1", "offset": 22000}) if n == 2 else
-                ("finish", {"status": "blocked", "summary": "Known failing check", "questions": [], "responses": []}))
+                ("finish", {"status": "blocked", "summary": "Known failing check", "questions": [], "responses": [], "notes": "", "lessons": []}))
             return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": str(n), "name": name, "input": args}]}
         agents.clients = {"anthropic": SimpleNamespace(call=call)}
         result = agents.run("coder", Path("/unused"), {"specification": "Keep requirements intact"}, lambda: None, lambda e: None)

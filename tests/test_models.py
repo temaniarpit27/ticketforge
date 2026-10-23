@@ -113,7 +113,7 @@ class BoundedTurnsTests(unittest.TestCase):
 class MixedProviderTests(unittest.TestCase):
     def test_coder_and_reviewer_use_their_own_provider_model_and_limits(self):
         anthropic, anthropic_requests = recorder([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "a1", "name": "finish",
-            "input": {"status": "ready", "summary": "done", "questions": [], "responses": []}}]}])
+            "input": {"status": "ready", "summary": "done", "questions": [], "responses": [], "notes": "", "lessons": []}}]}])
         openai, openai_requests = recorder([{"status": "completed", "output": [call_item("o1", "finish", json.dumps(
             {"status": "pass", "summary": "ok", "questions": [], "findings": [], "resolutions": []}))]}])
         runner = agents(cfg(), {"anthropic": anthropic, "openai": openai})
@@ -143,7 +143,7 @@ class MixedProviderTests(unittest.TestCase):
         self.assertIn("reconcile", reply["output"])
 
     def test_hook_rejection_is_returned_as_tool_error(self):
-        bad = {"status": "ready", "summary": "s", "questions": [], "responses": []}
+        bad = {"status": "ready", "summary": "s", "questions": [], "responses": [], "notes": "", "lessons": []}
         anthropic, requests = recorder([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "a1", "name": "finish", "input": bad}]}] * 2)
 
         def hook(result):
@@ -237,7 +237,7 @@ class ProviderSpecTests(unittest.TestCase):
     def test_same_provider_and_model_for_both_roles_shares_one_client(self):
         http, requests = recorder([
             {"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "1", "type": "function", "function": {
-                "name": "finish", "arguments": json.dumps({"status": "ready", "summary": "s", "questions": [], "responses": []})}}]}}]},
+                "name": "finish", "arguments": json.dumps({"status": "ready", "summary": "s", "questions": [], "responses": [], "notes": "", "lessons": []})}}]}}]},
             {"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "2", "type": "function", "function": {
                 "name": "finish", "arguments": json.dumps({"status": "pass", "summary": "s", "questions": [], "findings": [], "resolutions": []})}}]}}]},
         ])

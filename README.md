@@ -249,6 +249,24 @@ One round goes like this:
 `max_review_rounds` (default 3) caps the total number of rounds. Using two different models
 helps, because they tend to make different mistakes, but neither AI replaces your review.
 
+## What the agents remember
+
+Each AI run starts a fresh conversation, so TicketForge hands it what it needs instead of
+making it rediscover the code every time:
+
+| What | Who gets it | Where it comes from |
+|---|---|---|
+| **Package map**: every package, its one-line description, files, tests and internal imports | Coder and reviewer | `go list`, run once per starting commit and saved, so every ticket on that commit reuses it |
+| **The coder's own notes** from its last round on this ticket (key files, decisions, what is left) | Coder only | The coder writes them at the end of each round |
+| **Git history**: recent commits before the ticket, commits on the ticket, files changed so far | Coder only | Read from the ticket's branch |
+| **Lessons**: facts about the repository from earlier tickets | Coder only | Proposed by the coder with the PR; kept only if you reply `/forge learn` and the PR is merged |
+| **Build cache** | Each role its own | Shared across tickets of the repository, so builds are incremental |
+
+**The reviewer stays independent.** It never sees the coder's notes, summary, reasoning or
+lessons, and its copy of `PROJECT.md` leaves out the "Learned from tickets" section. It gets
+the requirements, the code, your hand-written guide and the neutral package map. Commit
+messages are kept neutral for the same reason (the reviewer can read them).
+
 ## Talking to the agent
 
 Use ordinary Jira comments for answers, corrections, and implementation requests.
@@ -261,6 +279,7 @@ Answers can arrive at any active stage; the coder and reviewer can ask later que
 | `/forge resume` | Resume using current requirements |
 | `/forge retry` | Retry after resolving a blocker; reset attempt limits |
 | `/forge note TEXT` | Record a non-actionable note without restarting work |
+| `/forge learn` or `/forge learn 1,3` | Keep the coder's suggested repository facts (all, or the numbered ones); saved to `PROJECT.md` when the PR is merged |
 
 `/forge approve` is unsupported. Approve and merge on GitHub.
 GitHub inline comments are not implementation instructions: post change requests on Jira.
@@ -318,9 +337,10 @@ Honest list of what this does **not** do yet:
   check, every ticket will fail it too; there is no "it was already broken" comparison.
 - **No automatic rebase.** The branch starts from `main` when the ticket starts. If `main`
   moves on and conflicts, you resolve it.
-- **The AI forgets between runs.** Each run rebuilds what it knows from the ticket and the
-  code. Long conversations are trimmed (big outputs are stored and can be re-read). There is
-  no spending limit in dollars and no prompt caching yet.
+- **Memory is deliberately small.** The AI gets a package map, its own notes and the Git
+  history, but no hidden long-term memory: anything kept across tickets is a lesson you
+  approved in `PROJECT.md`. Long conversations are trimmed (big outputs are stored and can be
+  re-read). There is no spending limit in dollars and no prompt caching yet.
 - **Retries are careful, not magic.** Reads and AI calls are retried after short failures.
   Writes (comments, pull requests) are checked first instead of blindly repeated. Jira,
   GitHub and the local database cannot be updated as one unit, so in rare failures you might

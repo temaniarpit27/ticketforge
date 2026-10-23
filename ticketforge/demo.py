@@ -52,7 +52,7 @@ class DemoJira:
 
 
 class DemoRepository(Repository):
-    def context(self, workspace):
+    def context(self, workspace, reviewer=False):
         # Internal coordinator fixture only; real Repository.context enforces Go support.
         return {"language": "scripted-test-fixture", "warnings": []}
 
@@ -134,7 +134,7 @@ class DemoAgents:
         result = {"summary": "Implemented threshold behavior and verified boundary cases.", "questions": []}
         if not notes:
             question = {**result, "status": "needs_input", "questions": ["What subtotal qualifies for free shipping?"]}
-            question.update({"coder": {"responses": []}, "reviewer": {"findings": [], "resolutions": []}}.get(role, {}))
+            question.update({"coder": {"responses": [], "notes": "", "lessons": []}, "reviewer": {"findings": [], "resolutions": []}}.get(role, {}))
             return question
         threshold = 150 if any("150" in n["text"] for n in notes) else 100
         if role == "assessor":
@@ -151,7 +151,8 @@ class DemoAgents:
                     f"    def test_boundary(self): self.assertEqual(shipping_cost({threshold}), 0)\n"
                     f"    def test_above(self): self.assertEqual(shipping_cost({threshold + 1}), 0)\n")
             responses = [{"id": f["id"], "action": "fixed", "evidence": "Inclusive comparison; boundary test added."} for f in open_findings]
-            return self.finish(role, {**result, "status": "ready", "responses": responses}, on_finish)
+            notes = "shipping.py holds shipping_cost; boundary tests live in tests/test_shipping.py."
+            return self.finish(role, {**result, "status": "ready", "responses": responses, "notes": notes, "lessons": []}, on_finish)
         code = (workspace / "shipping.py").read_text()
         inclusive = " >= " in code
         findings = [] if inclusive else [{

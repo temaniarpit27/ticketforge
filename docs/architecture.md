@@ -49,6 +49,20 @@ can drop obsolete work and withdraw findings that no longer apply.
 Unassigning stops any agent state (`ready` through `blocked`) and bumps the version so an
 in-flight model run is discarded. An open PR (`awaiting_approval`) keeps being tracked.
 
+## Agent memory
+
+| Input | Coder | Reviewer | Source |
+|---|---|---|---|
+| `project_context.repo_map` | yes | yes | `go list` per base commit, saved in `state/repo-maps/<sha>.json` (failures saved too) |
+| `your_notes_from_last_round` | yes | no | coder `finish.notes`, kept in `data.coder_notes` |
+| `history` | yes | no | `Repository.history`: base log, ticket commits, diffstat, status |
+| learned section of the profile guide | yes | no | `/forge learn` approvals, appended on merge (`record_merge`) |
+| build cache | per role | per role | shared across tickets of the repository |
+
+The reviewer receives nothing written by the coder model: no notes, summary, reasoning or
+lessons (`Repository.context(reviewer=True)` drops the learned section). Prior findings
+and the coder's per-finding evidence arrive only in the reconciliation pass.
+
 ## Coder/reviewer dialogue
 
 Findings live in a ledger in ticket data (`review.py`), with stable IDs that survive new

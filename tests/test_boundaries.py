@@ -88,18 +88,25 @@ class BoundaryTests(unittest.TestCase):
             load_env(path)
             self.assertEqual(os.environ["TOKEN"], "$(touch /tmp/should-never-run)")
 
-    def test_reviewer_cache_reuses_ticket_but_never_other_roles_or_tickets(self):
+    def test_caches_are_shared_across_tickets_but_never_across_roles_or_images(self):
         sandbox = self.sandbox()
         root = Path(sandbox.cfg.state_dir) / "workspaces"
-        first = root / "APP-1" / "review-v1-random"
-        second = root / "APP-1" / "review-v2-other"
-        cache = sandbox.cache_dir(first, "reviewer")
-        self.assertEqual(cache, sandbox.cache_dir(second, "reviewer"))
-        self.assertNotEqual(cache, sandbox.cache_dir(first, "coder"))
-        self.assertNotEqual(cache, sandbox.cache_dir(first, "verify"))
-        self.assertNotEqual(cache, sandbox.cache_dir(root / "APP-2" / "review-v1-random", "reviewer"))
+        cases = [
+            ("coder", root / "APP-1" / "coder", root / "APP-2" / "coder"),
+            ("verify", root / "APP-1" / "coder", root / "APP-2" / "coder"),
+            ("reviewer", root / "APP-1" / "review-v1-random", root / "APP-2" / "review-v3-other"),
+        ]
+        for role, first, second in cases:
+            with self.subTest(role):
+                self.assertEqual(sandbox.cache_dir(first, role), sandbox.cache_dir(second, role))
+        ticket = root / "APP-1" / "coder"
+        caches = {sandbox.cache_dir(ticket, role) for role in ("coder", "reviewer", "verify", "assessor")}
+        self.assertEqual(len(caches), 4)
+        outside = Path(sandbox.cfg.state_dir).parent / "elsewhere"
+        self.assertNotEqual(sandbox.cache_dir(outside, "coder"), sandbox.cache_dir(ticket, "coder"))
+        before = sandbox.cache_dir(ticket, "coder")
         sandbox.cfg.sandbox_image = "other-toolchain:local"
-        self.assertNotEqual(cache, sandbox.cache_dir(first, "reviewer"))
+        self.assertNotEqual(before, sandbox.cache_dir(ticket, "coder"))
 
     def test_auto_merge_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:

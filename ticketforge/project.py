@@ -87,6 +87,53 @@ def discover_skills(root):
     return catalog
 
 
+# Writes the package list to the sandbox cache folder instead of stdout, because command
+# output shown to us is capped and a big repository's list would be cut off mid-JSON.
+REPO_MAP_FILE = "repo-map.json"
+REPO_MAP_COMMAND = ("go list -e -json=ImportPath,Name,Doc,GoFiles,TestGoFiles,XTestGoFiles,Imports ./... "
+                    f"> /cache/{REPO_MAP_FILE}")
+
+
+def parse_repo_map(text, module, limit=30000):
+    """Turn `go list -json` output into a compact package map the agents can read at a glance.
+
+    One entry per package: its folder relative to the module ("." is the root), the first
+    line of its doc comment, its Go files and test files, and which of this module's own
+    packages it imports. If the map is too big, file names are dropped first, then packages.
+    """
+    decoder, packages, position = json.JSONDecoder(), [], 0
+    while True:
+        # go list prints one JSON object after another, not a JSON array.
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position >= len(text):
+            break
+        item, position = decoder.raw_decode(text, position)
+
+        def local(path):
+            return "." if path == module else path[len(module) + 1:] if path.startswith(module + "/") else None
+
+        name = local(item.get("ImportPath", ""))
+        if name is None:
+            continue
+        packages.append({
+            "package": name,
+            "doc": (item.get("Doc") or "").split("\n")[0][:160],
+            "files": item.get("GoFiles") or [],
+            "tests": (item.get("TestGoFiles") or []) + (item.get("XTestGoFiles") or []),
+            "imports": sorted(p for p in (local(i) for i in item.get("Imports") or []) if p is not None),
+        })
+    packages.sort(key=lambda p: p["package"])
+    result = {"module": module, "packages": packages, "truncated": False}
+    if len(json.dumps(result)) > limit:
+        for package in packages:
+            package["files"], package["tests"] = len(package["files"]), len(package["tests"])
+    while len(json.dumps(result)) > limit and packages:
+        packages.pop()
+        result["truncated"] = True
+    return result
+
+
 def go_dockerfile(context, has_sum):
     copied = "go.mod go.sum" if has_sum else "go.mod"
     return (f"ARG GO_VERSION={context['toolchain_version']}\nFROM golang:${{GO_VERSION}}\n"

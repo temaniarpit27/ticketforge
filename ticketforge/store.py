@@ -137,7 +137,9 @@ class Store:
             elif json.dumps(old["snapshot"], sort_keys=True) != encoded:
                 version = old["version"] + 1
                 data = old["data"]
-                data.update(approval=None, review=None, round=0, review_round=0, verification_repairs=0, retry_at=0, remote_retries=0)
+                # New requirements mean new code: earlier approval of proposed notes no longer applies.
+                data.update(approval=None, review=None, round=0, review_round=0, verification_repairs=0, retry_at=0, remote_retries=0,
+                            lessons_approved=None)
                 state = old["state"] if old["state"] in ("paused", "unassigned", "merged", "closed") else "ready"
                 db.execute("UPDATE tickets SET version=?, snapshot=?, state=?, data=? WHERE key=?",
                            (version, encoded, state, json.dumps(data), key))
@@ -167,10 +169,25 @@ class Store:
                     db.execute("UPDATE tickets SET version=?,state=?,data=? WHERE key=?",
                                (version, state, json.dumps(data), key))
                     self._post(db, key, f"command:{cid}:{digest}", f"Command applied: {command}. Current state: {state}.")
+                elif command == "learn" or command.startswith("learn "):
+                    lessons = (data.get("coder_result") or {}).get("lessons") or []
+                    choice = command[len("learn"):].replace(" ", "")
+                    picks = list(range(1, len(lessons) + 1)) if not choice else (
+                        [int(n) for n in choice.split(",")] if re.fullmatch(r"[0-9]+(,[0-9]+)*", choice) else None)
+                    if state != "awaiting_approval" or not lessons:
+                        msg = "There are no proposed notes to keep right now. They are offered with a PR."
+                    elif picks is None or any(not 1 <= n <= len(lessons) for n in picks):
+                        msg = f"Use /forge learn to keep all notes, or numbers between 1 and {len(lessons)}, for example /forge learn 1,3."
+                    else:
+                        # Copy the text now: a later round may propose different notes.
+                        data["lessons_approved"] = [lessons[n - 1] for n in dict.fromkeys(picks)]
+                        db.execute("UPDATE tickets SET data=? WHERE key=?", (json.dumps(data), key))
+                        msg = f"Will save {len(data['lessons_approved'])} note(s) to the project guide when the PR is merged."
+                    self._post(db, key, f"command:{cid}:{digest}", msg)
                 elif command.startswith("note "):
                     self._post(db, key, f"command:{cid}:{digest}", "Note recorded. No new implementation requested.")
                 else:
-                    self._post(db, key, f"command:{cid}:{digest}", "Commands: /forge pause, /forge resume, /forge retry, /forge note TEXT. Approve and merge on GitHub. Write requirements and answers as ordinary comments.")
+                    self._post(db, key, f"command:{cid}:{digest}", "Commands: /forge pause, /forge resume, /forge retry, /forge note TEXT, /forge learn [numbers]. Approve and merge on GitHub. Write requirements and answers as ordinary comments.")
                 self._event(db, key, "command", {"command": command, "comment": cid})
             self._sync_assignment(db, key, assigned)
 
@@ -257,6 +274,15 @@ class Store:
             self._post(db, key, "merged", f"Merged: {url}\nMerge commit: {sha}\nThis ticket's run is complete.")
             if t["version"] != data.get("reviewed_version"):
                 self._post(db, key, "input-during-merge", "New input arrived at the merge boundary. It was not included in the merged review. Please create a follow-up ticket; the completed merge cannot be retroactively changed.")
+
+    def annotate(self, key, **changes):
+        """Set data fields without a version check. Only for finished (merged/closed) tickets,
+        where no agent run can be in progress."""
+        with self.transaction() as db:
+            data = self.get(key)["data"]
+            data.update(changes)
+            db.execute("UPDATE tickets SET data=? WHERE key=?", (json.dumps(data), key))
+            self._event(db, key, "annotated", {"fields": list(changes)})
 
     def current(self):
         """The ticket the worker is focused on, kept across restarts (or None)."""

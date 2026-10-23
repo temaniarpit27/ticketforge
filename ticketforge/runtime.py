@@ -81,13 +81,19 @@ class Sandbox:
         return result
 
     def cache_dir(self, workspace, role="coder"):
-        # Reviewer rounds reuse only their own ticket cache, never a coder/verifier cache.
+        """The Go build cache folder for a role.
+
+        Every ticket of this repository shares one cache per role, so a new ticket's first
+        build reuses earlier work instead of compiling everything again. Roles never share
+        a cache: the verifier and reviewer must not reuse files the coder's commands wrote.
+        A checkout outside TicketForge's own workspaces (tests, doctor) gets its own cache.
+        """
         if role not in ("coder", "reviewer", "verify", "assessor"):
             raise ValueError("Unknown sandbox role")
         workspace_id = str(workspace.resolve())
         managed = Path(self.cfg.state_dir).resolve() / "workspaces"
-        if role == "reviewer" and workspace.resolve().parent.parent == managed:
-            workspace_id = "ticket:" + workspace.resolve().parent.name
+        if workspace.resolve().parent.parent == managed:
+            workspace_id = "repository"
         identity = f"{role}:{workspace_id}:{self.cfg.sandbox_image}"
         key = hashlib.sha256(identity.encode()).hexdigest()[:24]
         path = Path(self.cfg.state_dir).resolve() / "caches" / key
@@ -145,16 +151,43 @@ class Repository:
         return process(["git", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
                         "-c", "protocol.ext.allow=never", *args], cwd=cwd, env=env, check=check)["output"].strip()
 
-    def context(self, workspace):
+    def context(self, workspace, reviewer=False):
+        """Facts about the repository for an agent: language, module, guides and structure.
+
+        Your profile guide (PROJECT.md) is included. Its "Learned from tickets" section was
+        written by the coder (and approved by you), so the reviewer never gets it: the
+        reviewer must not be influenced by anything the coder wrote.
+        """
         from .adapters import language_adapter
         context = language_adapter(self.cfg.language).inspect(workspace)
         if self.cfg.project_guide:
-            path = Path(self.cfg.project_guide)
-            with path.open("rb") as stream:
-                raw = stream.read(12001)
-            context["documents"].append({"path": "operator-profile:PROJECT.md", "text": raw[:12000].decode("utf-8", errors="replace"),
-                                         "truncated": len(raw) > 12000})
+            with Path(self.cfg.project_guide).open("rb") as stream:
+                text = stream.read(256 * 1024).decode("utf-8", errors="replace")
+            guide, _, learned = text.partition(LEARNED_HEADING)
+            context["documents"].append({"path": "operator-profile:PROJECT.md", "text": guide[:12000],
+                                         "truncated": len(guide) > 12000})
+            if learned.strip() and not reviewer:
+                # Newest lessons are at the end; keep those if the list has grown long.
+                context["documents"].append({"path": "operator-profile:learned-from-tickets",
+                                             "text": learned.strip()[-6000:], "truncated": len(learned.strip()) > 6000})
         return context
+
+    def history(self, workspace):
+        """What the coder needs to build on earlier work: recent commits of the branch it started
+        from, its own commits on this ticket, files changed so far, and uncommitted edits.
+
+        Read-only Git, run on the host. The agent can dig deeper itself with git log/diff/show.
+        """
+        def lines(*args, limit=60):
+            output = self.git(*args, cwd=workspace, check=False)
+            items = [line for line in output.splitlines() if line.strip()]
+            return items[:limit] + ([f"... {len(items) - limit} more"] if len(items) > limit else [])
+        return {
+            "recent_commits_before_this_ticket": lines("log", "-n", "15", "--format=%h %ad %s", "--date=short", "refs/ticketforge/base"),
+            "commits_on_this_ticket": lines("log", "--format=%h %s", "refs/ticketforge/base..HEAD"),
+            "files_changed_so_far": lines("diff", "--stat=120", "refs/ticketforge/base", "--"),
+            "uncommitted_changes": lines("status", "--porcelain"),
+        }
 
     def prepare(self, key):
         """Create (once) the coder checkout for a ticket on branch ticketforge/<key>.
@@ -220,6 +253,9 @@ class Repository:
 
 
 # Tools every role gets. finish is added per role with that role's result schema.
+# Heading under which approved lessons are kept in the profile guide.
+LEARNED_HEADING = "## Learned from tickets"
+
 TOOLS = [{"name": "shell", "description": "Run a shell command inside the isolated repository container. No network or service credentials. Git metadata is read-only. Output is bounded.",
           "input_schema": {"type": "object", "properties": {"command": {"type": "string"}},
                            "required": ["command"], "additionalProperties": False}},

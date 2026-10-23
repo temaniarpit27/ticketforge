@@ -29,7 +29,8 @@ class ValidationTests(unittest.TestCase):
         review.validate_finish("reviewer", reviewer("pass", [finding("advisory")]))
         review.validate_finish("reviewer", reviewer("changes_requested", [finding()]))
         review.validate_finish("coder", {"status": "ready", "summary": "s", "questions": [],
-                                         "responses": [{"id": "F1", "action": "disputed", "evidence": "test proves it"}]})
+                                         "responses": [{"id": "F1", "action": "disputed", "evidence": "test proves it"}],
+                                         "notes": "Touched shipping.py", "lessons": ["Run make gen after editing protos"]})
 
     def test_role_fields_are_exact(self):
         with self.assertRaisesRegex(ValueError, "fields must be exactly"):

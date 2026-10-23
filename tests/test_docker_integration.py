@@ -91,6 +91,13 @@ class DockerGoTests(unittest.TestCase):
         self.assertEqual(self.sandbox.cache_dir(reviewer, "reviewer"), self.sandbox.cache_dir(second, "reviewer"))
         self.assertNotEqual(self.sandbox.cache_dir(self.workspace), self.sandbox.cache_dir(reviewer, "reviewer"))
         self.run_ok("test ! -w /workspace/.git/config && test ! -w /etc/passwd")
+        # The package map is made with a read-only checkout and written to the verify cache.
+        adapter = GoAdapter()
+        self.run_ok(adapter.repo_map_command(), role="verify", read_only=True)
+        raw = (self.sandbox.cache_dir(self.workspace, "verify") / "repo-map.json").read_text()
+        repo_map = adapter.parse_repo_map(raw, "example.com/smoke")
+        self.assertEqual([p["package"] for p in repo_map["packages"]], ["."])
+        self.assertIn("counter_test.go", repo_map["packages"][0]["tests"])
 
 
 if __name__ == "__main__":

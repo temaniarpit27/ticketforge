@@ -64,6 +64,7 @@ class DialogueTests(Base):
                 return original(role, workspace, task, guard, trace, on_finish)
             (workspace / "shipping.py").write_text("def shipping_cost(subtotal):\n    return 0 if subtotal > 100 else 10\n")
             result = {"status": "ready", "summary": "Kept exclusive threshold", "questions": [],
+                      "notes": "", "lessons": [],
                       "responses": [{"id": f["id"], "action": "disputed", "evidence": "Ticket says 'above 100'."}
                                     for f in task["open_findings"]]}
             self.assertIsNone(on_finish(result))
@@ -99,7 +100,7 @@ class DialogueTests(Base):
 
         def run(role, workspace, task, guard, trace, on_finish=None):
             if role == "coder":
-                skipped = {"status": "ready", "summary": "s", "questions": [], "responses": []}
+                skipped = {"status": "ready", "summary": "s", "questions": [], "responses": [], "notes": "", "lessons": []}
                 with self.assertRaisesRegex(ValueError, "Missing: \\['F1'\\]"):
                     on_finish(skipped)
                 seen.append(True)

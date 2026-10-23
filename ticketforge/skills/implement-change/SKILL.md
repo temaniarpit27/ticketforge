@@ -3,7 +3,13 @@ name: implement-change
 description: Implement the current Jira specification with focused changes and evidence-based verification.
 ---
 
-1. Inspect repository instructions, architecture, existing conventions, and relevant tests.
+1. Start from what you are given: project_context.repo_map lists every package with its doc
+   line, files, tests and internal imports (made by `go list`, so it is accurate for the
+   starting commit). your_notes_from_last_round is what you wrote last round on this ticket.
+   history shows recent commits before the ticket, your commits on it, files changed so far
+   and uncommitted edits. Build on that work: check notes against the actual files rather
+   than trusting them, and use read-only git log, git diff and git show for more detail.
+   Inspect repository instructions, architecture, existing conventions, and relevant tests.
    Live support currently covers standalone Go modules. If the change needs another
    implementation language or a multi-module workspace, report blocked on Jira rather
    than pretending that the Go sandbox can verify it.
@@ -26,7 +32,11 @@ description: Implement the current Jira specification with focused changes and e
    new or changed, and remove or adjust work for anything that was dropped. Do not keep code
    only because it already exists. If a change makes an open finding irrelevant, dispute it
    and cite the requirement change as evidence.
-8. Return ready only when the requested change is implemented. Return blocked for unavailable
+8. In notes, write what your next round on this ticket should know: key files and functions,
+   decisions and why, what is left or uncertain. Short and factual. In lessons, list at most
+   five facts about this repository that would help future tickets (a convention, a command,
+   a gotcha), not about this ticket; often there are none. A human decides which to keep.
+9. Return ready only when the requested change is implemented. Return blocked for unavailable
    prerequisites, and needs_input for unresolved product requirements.
 
 Do not modify Git metadata, commits, remotes, CI workflow files, dependency lockfiles merely

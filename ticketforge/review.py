@@ -31,6 +31,10 @@ RESOLUTION_SCHEMA = {"type": "object", "properties": {
     "evidence": {"type": "string"},
 }, "required": ["id", "status", "evidence"], "additionalProperties": False}
 
+MAX_NOTES = 4000
+MAX_LESSONS = 5
+MAX_LESSON_CHARS = 300
+
 STATUSES = {
     "assessor": ["ready", "needs_input", "blocked"],
     "coder": ["ready", "needs_input", "blocked"],
@@ -53,6 +57,11 @@ def finish_schema(role):
                   "questions": {"type": "array", "items": {"type": "string"}}}
     if role == "coder":
         properties["responses"] = {"type": "array", "items": RESPONSE_SCHEMA}
+        # Notes to itself for the next round of this ticket (key files, decisions, what is left).
+        properties["notes"] = {"type": "string", "maxLength": MAX_NOTES}
+        # Facts about the repository worth keeping for future tickets; a human approves them.
+        properties["lessons"] = {"type": "array", "maxItems": MAX_LESSONS,
+                                 "items": {"type": "string", "maxLength": MAX_LESSON_CHARS}}
     if role == "reviewer":
         properties["findings"] = {"type": "array", "items": FINDING_SCHEMA}
         properties["resolutions"] = {"type": "array", "items": RESOLUTION_SCHEMA}
@@ -83,12 +92,18 @@ def validate_finish(role, args):
     if status not in STATUSES[role] or not isinstance(args["summary"], str):
         raise ValueError("Invalid finish status or summary")
     for name in schema["required"]:
-        if name in ("status", "summary"):
+        if name in ("status", "summary", "notes"):
             continue
         if not isinstance(args[name], list):
             raise ValueError(f"{name} must be a list")
     if any(not isinstance(q, str) for q in args["questions"]):
         raise ValueError("questions must be strings")
+    if role == "coder":
+        if not isinstance(args["notes"], str) or len(args["notes"]) > MAX_NOTES:
+            raise ValueError(f"notes must be text of at most {MAX_NOTES} characters")
+        lessons = args["lessons"]
+        if len(lessons) > MAX_LESSONS or any(not isinstance(l, str) or not l.strip() or len(l) > MAX_LESSON_CHARS for l in lessons):
+            raise ValueError(f"lessons: at most {MAX_LESSONS} non-empty items of at most {MAX_LESSON_CHARS} characters")
     for item in args.get("responses", []):
         _check_object(item, RESPONSE_SCHEMA, "response")
     for item in args.get("findings", []):
