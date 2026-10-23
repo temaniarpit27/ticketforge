@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 from . import review
-from .store import Store, Superseded
+from .store import FINISHED_STATES, Store, Superseded
 from .integrations import RateLimited, RemoteError
 
 log = logging.getLogger(__name__)
@@ -21,8 +21,8 @@ class Coordinator:
     This class, which is ordinary code, decides what happens next. It is the only part that
     runs the checks, commits, pushes, opens the pull request and writes to Jira.
 
-    Two threads: one does the work (tick), the other reads Jira for new comments and sends
-    queued comments every few seconds.
+    Two threads: one does the work (tick), one ticket at a time; the other keeps reading Jira
+    for new comments and sends queued comments, so nothing is missed while the work runs.
     """
 
     def __init__(self, cfg, store: Store, jira, github, repo, agents, sandbox):
@@ -32,6 +32,8 @@ class Coordinator:
         self.stop = threading.Event()
         self.sync_lock = threading.RLock()
         self.post_lock = threading.Lock()
+        # When each waiting PR is next checked: key -> ((version, head), monotonic deadline).
+        self.status_schedule = {}
 
     def sync_one(self, key):
         # Serialize reads too, so an older API response cannot overwrite a newer snapshot.
@@ -40,9 +42,15 @@ class Coordinator:
             self.store.sync(key, snapshot, comments)
 
     def poll(self):
-        keys = set(self.jira.discover())
-        # Continue monitoring known tickets even when the discovery filter no longer matches.
-        keys.update(t["key"] for t in self.store.all())
+        """Read Jira for every ticket the agent may still act on.
+
+        That is: tickets the filter finds now (assigned to the bot), plus tickets still in
+        progress even if the filter stopped matching them (that is how an unassignment is
+        noticed). Merged, closed and unassigned tickets are never read again; a reassigned
+        ticket shows up through the filter."""
+        known = {t["key"]: t["state"] for t in self.store.all()}
+        keys = {key for key in self.jira.discover() if known.get(key) not in ("merged", "closed")}
+        keys.update(key for key, state in known.items() if state not in FINISHED_STATES)
         for key in sorted(keys):
             try:
                 self.sync_one(key)
@@ -345,56 +353,82 @@ class Coordinator:
                       "\n\nPlease write implementation requests on this Jira ticket.")
 
     def tick(self):
-        """One scheduler pass: run at most one ready ticket, poll waiting PRs on their schedule.
+        """One scheduler pass. Works like a single-core processor that never interrupts a job:
 
-        Remote failures defer the ticket (rate limits honour Retry-After) and block it only after
-        max_remote_retries consecutive failures; any other error blocks it with the reason."""
+        1. Check PRs waiting for your review, each on its own (slower) schedule.
+        2. Keep working on the current ticket for as long as it can continue. Only when it
+           cannot (waiting for an answer, blocked, PR raised, paused, unassigned, or backing
+           off after a rate limit) switch to the ready ticket that has waited longest.
+
+        Errors are handled per ticket, so one failing ticket never stops the others.
+        """
         for ticket in self.store.all():
             if self.stop.is_set():
                 return
-            key, version = ticket["key"], ticket["version"]
-            if ticket["data"].get("retry_at", 0) > time.time():
-                continue
+            if ticket["state"] == "awaiting_approval" and self.pr_check_due(ticket):
+                self.attempt(ticket, self.check_merge)
+        if self.stop.is_set():
+            return
+        chosen = self.next_ticket(self.store.all())
+        if chosen:
+            # Remember the choice, so after a restart the worker continues the same ticket.
+            self.store.set_current(chosen["key"])
+            self.attempt(chosen, self.work)
+
+    def next_ticket(self, tickets):
+        """Pick what to work on: the current ticket while it is ready, otherwise the ready
+        ticket that has been waiting longest (ties: lowest key). None when nothing is ready."""
+        now = time.time()
+        ready = [t for t in tickets if t["state"] == "ready" and t["data"].get("retry_at", 0) <= now]
+        current = self.store.current()
+        for ticket in ready:
+            if ticket["key"] == current:
+                return ticket
+        return min(ready, key=lambda t: (t["ready_since"] or 0, t["key"]), default=None)
+
+    def pr_check_due(self, ticket):
+        """True when a waiting PR should be checked again. A new spec or commit checks at once."""
+        token = (ticket["version"], ticket["data"].get("head"))
+        previous = self.status_schedule.get(ticket["key"])
+        now = time.monotonic()
+        if previous is not None and previous[0] == token and now < previous[1]:
+            return False
+        # Schedule before the check, so a failing check cannot turn into a tight retry loop.
+        self.status_schedule[ticket["key"]] = (token, now + self.cfg.status_poll_seconds)
+        return True
+
+    def attempt(self, ticket, step):
+        """Run one step (work or check_merge) for a ticket and turn failures into ticket state.
+
+        Network failures defer the ticket (rate limits honour Retry-After) and block it only
+        after max_remote_retries failures in a row; any other error blocks it with the reason.
+        """
+        key, version = ticket["key"], ticket["version"]
+        try:
+            step(ticket)
+            self.store.remote_success(key, version)
+        except Superseded:
+            log.info("Task %s superseded or stopped", key)
+        except RemoteError as exc:
             try:
-                if ticket["state"] == "ready":
-                    self.work(ticket)
-                    self.store.remote_success(key, version)
-                    return
-                if ticket["state"] == "awaiting_approval":
-                    # A new specification/head bypasses the old status schedule.
-                    token = (version, ticket["data"].get("head"))
-                    previous = getattr(self, "status_schedule", {}).get(key)
-                    now = time.monotonic()
-                    if previous is None or previous[0] != token or now >= previous[1]:
-                        if not hasattr(self, "status_schedule"):
-                            self.status_schedule = {}
-                        # Schedule before I/O so failures cannot create a tight retry loop.
-                        self.status_schedule[key] = (token, now + self.cfg.status_poll_seconds)
-                        self.check_merge(ticket)
-                        self.store.remote_success(key, version)
-            except Superseded:
-                log.info("Task %s superseded or stopped", key)
-            except RemoteError as exc:
-                try:
-                    retries = self.store.get(key)["data"].get("remote_retries", 0) + 1
-                    delay = (exc.retry_after * 2 ** (retries - 1)
-                             if isinstance(exc, RateLimited) else self.cfg.status_poll_seconds)
-                    target = "awaiting_approval" if ticket["state"] == "awaiting_approval" else "ready"
-                    if retries > self.cfg.max_remote_retries:
-                        target = "blocked"
-                    action = "Retry budget exhausted; resolve the blocker and comment /forge retry." if target == "blocked" else "Retry scheduled."
-                    self.store.update(key, version, target, retry_at=time.time() + delay, remote_retries=retries,
-                                      notice=(f"deferred:{version}:{time.time_ns()}", f"Remote request deferred: {exc}. Saved work is retained. {action}"))
-                except Superseded:
-                    pass
-            except Exception as exc:
-                log.exception("Task %s failed", key)
-                try:
+                retries = self.store.get(key)["data"].get("remote_retries", 0) + 1
+                delay = (exc.retry_after * 2 ** (retries - 1)
+                         if isinstance(exc, RateLimited) else self.cfg.status_poll_seconds)
+                target = "awaiting_approval" if ticket["state"] == "awaiting_approval" else "ready"
+                if retries > self.cfg.max_remote_retries:
                     target = "blocked"
-                    self.store.update(key, version, target, error=str(exc)[:2000], notice=(f"error:{version}:{time.time_ns()}",
-                              f"Work stopped: {type(exc).__name__}: {str(exc)[:1500]}\nSaved work is retained. Resolve the blocker and comment /forge retry."))
-                except Superseded:
-                    pass
+                action = "Retry budget exhausted; resolve the blocker and comment /forge retry." if target == "blocked" else "Retry scheduled."
+                self.store.update(key, version, target, retry_at=time.time() + delay, remote_retries=retries,
+                                  notice=(f"deferred:{version}:{time.time_ns()}", f"Remote request deferred: {exc}. Saved work is retained. {action}"))
+            except Superseded:
+                pass
+        except Exception as exc:
+            log.exception("Task %s failed", key)
+            try:
+                self.store.update(key, version, "blocked", error=str(exc)[:2000], notice=(f"error:{version}:{time.time_ns()}",
+                          f"Work stopped: {type(exc).__name__}: {str(exc)[:1500]}\nSaved work is retained. Resolve the blocker and comment /forge retry."))
+            except Superseded:
+                pass
 
     def run(self):
         """Foreground service loop until stop is set (Ctrl+C / SIGTERM)."""

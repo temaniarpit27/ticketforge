@@ -14,6 +14,8 @@ from .integrations import ASSIGNED
 
 # States in which the agent works or will work on the ticket without a human merge.
 AGENT_STATES = ("ready", "assessing", "coding", "reviewing", "publishing", "waiting_input", "blocked")
+# States the agent never returns to on its own; such tickets are no longer read from Jira.
+FINISHED_STATES = ("merged", "closed", "unassigned")
 
 
 class Superseded(Exception):
@@ -21,13 +23,19 @@ class Superseded(Exception):
 
 
 class Store:
-    """SQLite state for one profile, safe for the worker and the Jira thread to share.
+    """Everything TicketForge remembers, in one SQLite file. Safe to use from both threads.
 
-    tickets: one row per issue with its specification snapshot, version, state and a JSON
-    data blob (assessment, findings ledger, PR info, counters). comments: digests of seen
-    human comments, so edits are detected and commands run once. events: audit history.
-    outbox: Jira comments waiting to be sent, written in the same transaction as the state
-    change they announce.
+    Tables:
+      tickets  - one row per Jira ticket: the current requirements and their version number,
+                 the state (ready, coding, waiting_input, ...), when it last joined the ready
+                 queue (ready_since), and a JSON "data" field with the rest (plan, finding
+                 ledger, PR details, counters).
+      comments - a fingerprint of every human comment seen, so an edited comment is noticed
+                 and a /forge command runs only once.
+      events   - a history of what happened, for debugging.
+      outbox   - Jira comments waiting to be sent. Saved together with the state change they
+                 announce, so a crash can neither lose nor duplicate them.
+      meta     - small settings; today only which ticket the worker is focused on.
     """
 
     def __init__(self, path: Path):
@@ -48,7 +56,26 @@ class Store:
           CREATE TABLE IF NOT EXISTS outbox (
             id TEXT PRIMARY KEY, key TEXT NOT NULL, body TEXT NOT NULL,
             sent INTEGER NOT NULL DEFAULT 0);
+          CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT NOT NULL);
         """)
+        # Older databases lack these columns; add them in place.
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(tickets)")}
+        for column in ("ready_since",):
+            if column not in columns:
+                self.db.execute(f"ALTER TABLE tickets ADD COLUMN {column} REAL")
+        # The database itself records when a ticket joined the ready queue, so every code path
+        # that makes a ticket ready is covered. The scheduler serves the longest-waiting first.
+        now = "((julianday('now') - 2440587.5) * 86400.0)"
+        self.db.executescript(f"""
+          CREATE TRIGGER IF NOT EXISTS ticket_new AFTER INSERT ON tickets BEGIN
+            UPDATE tickets SET ready_since = {now} WHERE key = NEW.key AND NEW.state = 'ready';
+          END;
+          CREATE TRIGGER IF NOT EXISTS ticket_ready AFTER UPDATE OF state ON tickets
+            WHEN NEW.state = 'ready' AND OLD.state != 'ready' BEGIN
+            UPDATE tickets SET ready_since = {now} WHERE key = NEW.key;
+          END;
+        """)
+        self.db.commit()
 
     @contextlib.contextmanager
     def transaction(self):
@@ -104,7 +131,7 @@ class Store:
             if old is None and not assigned:
                 return
             if old is None:
-                db.execute("INSERT INTO tickets VALUES(?,?,?,?,?)", (key, 1, encoded, "ready", "{}"))
+                db.execute("INSERT INTO tickets(key,version,snapshot,state,data) VALUES(?,?,?,?,?)", (key, 1, encoded, "ready", "{}"))
                 self._post(db, key, "accepted", "Ticket accepted. I will investigate and ask questions here when needed.")
                 self._event(db, key, "accepted", {"version": 1})
             elif json.dumps(old["snapshot"], sort_keys=True) != encoded:
@@ -230,6 +257,17 @@ class Store:
             self._post(db, key, "merged", f"Merged: {url}\nMerge commit: {sha}\nThis ticket's run is complete.")
             if t["version"] != data.get("reviewed_version"):
                 self._post(db, key, "input-during-merge", "New input arrived at the merge boundary. It was not included in the merged review. Please create a follow-up ticket; the completed merge cannot be retroactively changed.")
+
+    def current(self):
+        """The ticket the worker is focused on, kept across restarts (or None)."""
+        with self.lock:
+            row = self.db.execute("SELECT value FROM meta WHERE name = 'current'").fetchone()
+            return row[0] if row else None
+
+    def set_current(self, key):
+        """Remember which ticket the worker is focused on (see Coordinator.next_ticket)."""
+        with self.transaction() as db:
+            db.execute("INSERT OR REPLACE INTO meta VALUES ('current', ?)", (key,))
 
     def close(self):
         self.db.close()

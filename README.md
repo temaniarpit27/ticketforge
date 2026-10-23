@@ -33,6 +33,10 @@ Think of a small team: a developer, a reviewer, and you as the lead.
 8. **A pull request is opened** once nothing serious is left, and its link is posted on Jira.
 9. **You review and merge on GitHub.** TicketForge cannot merge; it only reports what happened.
 
+It works on one ticket at a time and keeps going on it until it gets stuck (for example,
+waiting for your answer); then it picks up the next ticket in line. See "Running it for a
+team, on a server" below.
+
 Jira holds the conversation (questions, answers, progress). GitHub holds the code. Jira
 columns are never moved automatically; progress is posted as comments.
 
@@ -81,14 +85,14 @@ are alternatives for manual setup.
 | `coder_model`, `reviewer_model` | Model ID per role; both roles may use the same provider and model |
 | `model_providers` | Your own providers (see below) |
 | `reviewer_max_output_tokens` | Reviewer output budget (25000; reasoning models need room) |
-| `max_finding_disputes` | Times a finding may stay disputed before you decide on Jira (2) |
+| `max_finding_disputes` | How many disagreements on one finding before you decide on Jira (1: ask you on the first one) |
 | `require_agent_assignment` | Only work on tickets assigned to the agent's Jira account (true) |
 | `jira_spec_fields` | Extra Jira fields that are part of the requirements, such as an acceptance-criteria custom field (`["customfield_10034"]`) |
 | `verification_commands` | Generated defaults check formatting, build, tests, race tests, and vet |
 | `sandbox_image` | Toolchain/dependency image for this repository |
 | `project_guide` | Optional external project context; generated profiles use `PROJECT.md` |
 | `commit_author_name`, `commit_author_email` | Optional author override; otherwise GIT_AUTHOR variables, then your Git identity |
-| `poll_seconds`, `status_poll_seconds` | Jira polling (15s) and waiting PR status polling (30s) |
+| `poll_seconds`, `status_poll_seconds` | How often to read Jira (15 s; 60 s is fine for a team) and to check each PR waiting for review (120 s) |
 | `protected_paths` | Paths the coordinator refuses to commit, including nested environment files |
 | `max_agent_steps`, `max_review_rounds`, `max_verification_repairs` | Separate bounded execution/repair limits |
 
@@ -189,10 +193,32 @@ toolchain probe. It does not validate remote credentials. `serve` runs in the fo
 Ctrl+C stops it. Restart with the same profile to reconcile persisted work.
 `python3 -m ticketforge status --config <profile>` prints local diagnostic state.
 
-The coordinator and Docker run on your machine; model inference runs at the configured providers.
-Sleep/shutdown pauses progress. Each profile supports one repository and one worker.
-Use separate profiles, state directories, images, and nonoverlapping Jira filters for
-other repositories. No public webhook endpoint or automatic repository router is provided.
+### Running it for a team, on a server
+
+TicketForge runs fine on your laptop for trying it out, but it only works while it is running.
+For a team, run it on an always-on Linux server or VM:
+
+- Install Docker and Python 3.9+ there, build the sandbox image, and keep the profile's state
+  folder on a persistent disk (back it up; it holds the ticket history).
+- Run `python3 -m ticketforge serve --config <profile>/config.json` under a process manager
+  such as systemd, so it restarts after a crash or reboot. It picks up where it left off.
+- **One repository = one TicketForge service = one Jira bot account.** Name each bot after
+  its repository (for example "payments-bot"). Each service only picks up tickets assigned to
+  its own bot, so services never step on each other.
+- Add everyone who may answer the bot's questions to `allowed_jira_accounts`.
+- Tip: add `AND statusCategory != Done` to `jira_jql` so marking a ticket Done also stops it.
+
+**How it shares its time.** It works on one ticket at a time, like a single-core processor
+that never interrupts a job. It stays on the current ticket, round after round, until that
+ticket cannot continue: it is waiting for an answer, is blocked, has its PR waiting for your
+review, is paused or unassigned, or is briefly backing off after a rate limit. Then it moves
+to the ready ticket that has been waiting longest. A ticket that gets an answer goes to the
+back of the queue; it never interrupts the current one. The current ticket is remembered
+across restarts. While it works, it keeps reading Jira in the background (so no answer is
+missed) and keeps checking waiting PRs.
+
+Merged, closed and unassigned tickets are not read again. Reassigning a ticket to the bot
+brings it back. There is no webhook server; Jira is polled.
 
 ## How the coder and reviewer talk
 
@@ -214,10 +240,11 @@ One round goes like this:
 4. **TicketForge decides what is next.** Anything blocking still open goes back to the coder.
    Advisory notes never cause another round; they are listed in the pull request instead.
    When nothing blocking is left, the pull request is opened.
-5. **If they cannot agree, you decide.** When the coder has disputed the same problem
-   `max_finding_disputes` times (default 2) and the reviewer still says it is wrong, the
-   ticket pauses. Jira shows both sides' arguments. Reply with your decision; both AIs then
-   look at that problem again with your answer in the ticket.
+5. **If they disagree, you decide, straight away.** When the coder disputes a problem and
+   the reviewer, after reading the coder's proof, still says it is wrong, the ticket pauses.
+   Jira shows both sides' arguments. Reply with your decision; both AIs then look at that
+   problem again with your answer in the ticket. There is no AI-versus-AI back-and-forth.
+   (To allow more attempts before asking you, raise `max_finding_disputes`; default 1.)
 
 `max_review_rounds` (default 3) caps the total number of rounds. Using two different models
 helps, because they tend to make different mistakes, but neither AI replaces your review.

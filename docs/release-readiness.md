@@ -16,7 +16,7 @@ No live Jira/GitHub/model end-to-end pilot has been completed.
 | 1 | Fixed | Non-login shell; real Docker finds and runs Go |
 | 2 | Fixed | Configurable 1 GiB file ceiling; real binary exceeds the old 64 KiB limit |
 | 3 | Fixed with retention limitation | Persistent isolated caches; reviewer rounds reuse ticket/role/image cache; no automatic quota/cleanup |
-| 4 | Fixed | Waiting PR schedule defaults to 30s; mock call-count regression |
+| 4 | Fixed | Waiting PRs are checked on a schedule (120 s by default since 0.3.0); finished tickets are no longer polled |
 | 5 | Fixed with explicit bounds | Canonical task preserved; archived observations recoverable; oversized canonical input blocks |
 | 6 | Fixed in 0.3.0 | Finding ledger, per-finding coder responses, independent pass then reconciliation, escalation to Jira |
 | 7 | Fixed | Verification repair and review budgets are separate |

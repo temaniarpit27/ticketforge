@@ -30,6 +30,16 @@ stateDiagram-v2
     unassigned --> ready: reassigned to agent
 ```
 
+## Scheduling
+
+One worker, non-preemptive. `tick()` first checks PRs waiting for review (each on its own
+`status_poll_seconds` schedule), then runs one round of work. The ticket it works on is the
+saved current ticket (`meta.current`) while it is `ready`; otherwise the ready ticket with the
+oldest `ready_since` (ties by key). A SQLite trigger sets `ready_since` whenever a ticket enters
+`ready`, so a ticket returning from `waiting_input` joins the back of the queue. A ticket
+backing off (`retry_at` in the future) is skipped. Polling reads tickets the filter finds plus
+tickets still in progress; `merged`, `closed` and `unassigned` tickets are not read again.
+
 Requirement changes (comments, summary, description, or `jira_spec_fields`) bump the version
 from any active state, including `awaiting_approval`; new work is pushed onto the same PR. The
 coordinator records the spec each coding and review round used (`worked_specification`,
@@ -55,7 +65,7 @@ specification versions. Each finding is `open`, `resolved`, `withdrawn`, `adviso
 The second reviewer pass is a `finish` hook: the coordinator answers the first `finish` call
 with the prior findings as the tool result, so the reviewer's first look is provably
 independent. A reviewer `open` after a coder `disputed` counts as one dispute; at
-`max_finding_disputes` the finding is escalated with both sides' evidence on Jira. Human input
+`max_finding_disputes` (default 1, so the first disagreement) the finding is escalated with both sides' evidence on Jira. Human input
 creates a new version, which reopens escalated findings with fresh dispute counts.
 
 Providers are configuration (`config.provider_specs`): a name maps to a wire protocol, base

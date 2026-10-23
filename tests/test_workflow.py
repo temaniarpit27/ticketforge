@@ -298,15 +298,19 @@ class WorkflowTests(unittest.TestCase):
 
     def test_waiting_pr_is_polled_only_on_its_schedule(self):
         self.ready_pr()
+        every = self.c.cfg.status_poll_seconds
         with patch.object(self.c.github, "pr", wraps=self.c.github.pr) as remote:
             with patch("ticketforge.coordinator.time.monotonic", return_value=100):
                 for _ in range(5): self.c.tick()
                 self.assertEqual(remote.call_count, 1)
-            with patch("ticketforge.coordinator.time.monotonic", return_value=131):
+            with patch("ticketforge.coordinator.time.monotonic", return_value=100 + every - 1):
+                self.c.tick()
+                self.assertEqual(remote.call_count, 1)
+            with patch("ticketforge.coordinator.time.monotonic", return_value=100 + every + 1):
                 self.c.tick()
                 self.assertEqual(remote.call_count, 2)
             self.c.github.human_merge(1, self.c.store.get(KEY)["data"]["head"])
-            with patch("ticketforge.coordinator.time.monotonic", return_value=162):
+            with patch("ticketforge.coordinator.time.monotonic", return_value=100 + 2 * every + 2):
                 self.c.tick()
             self.assertEqual(self.c.store.get(KEY)["state"], "merged")
 

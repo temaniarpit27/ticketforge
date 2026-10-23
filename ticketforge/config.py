@@ -88,14 +88,16 @@ class Config:
     protected_paths: list[str] = field(default_factory=lambda: [".github/workflows", ".gitmodules", ".env", ".env.*"])
     auto_merge: bool = False
     poll_seconds: int = 15
-    status_poll_seconds: int = 30
+    status_poll_seconds: int = 120
     max_agent_steps: int = 30
     max_review_rounds: int = 3
     max_verification_repairs: int = 3
     max_input_chars: int = 180000
     max_output_tokens: int = 6000
     reviewer_max_output_tokens: int = 25000
-    max_finding_disputes: int = 2
+    # How many times the coder may dispute a finding the reviewer still insists on before the
+    # human decides. 1 = ask the human on the first disagreement (no back-and-forth loops).
+    max_finding_disputes: int = 1
     command_timeout: int = 300
     sandbox_file_size_mb: int = 1024
     sandbox_tmp_mb: int = 1024
