@@ -13,7 +13,7 @@
   "project_guide": "",
   "sandbox_image": "ticketforge-sandbox:local",
   "verification_commands": [
-    "tf_unformatted=$(gofmt -l .) && if [ -n \"$tf_unformatted\" ]; then printf '%s\\n' \"$tf_unformatted\"; exit 1; fi",
+    "tf_unformatted=$(find . -name '*.go' -not -path './vendor/*' -not -path '*/testdata/*' -not -path '*/.*' -exec gofmt -l {} +) && if [ -n \"$tf_unformatted\" ]; then printf '%s\\n' \"$tf_unformatted\"; exit 1; fi",
     "go build ./...",
     "go test ./...",
     "go test -race ./...",

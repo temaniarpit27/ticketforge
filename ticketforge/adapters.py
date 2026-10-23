@@ -38,7 +38,8 @@ class GoAdapter:
         return go_dockerfile(context, has_sum)
 
     def verification_commands(self):
-        return ['tf_unformatted=$(gofmt -l .) && if [ -n "$tf_unformatted" ]; then printf \'%s\\n\' "$tf_unformatted"; exit 1; fi',
+        return ["tf_unformatted=$(find . -name '*.go' -not -path './vendor/*' -not -path '*/testdata/*' -not -path '*/.*' -exec gofmt -l {} +) && "
+                'if [ -n "$tf_unformatted" ]; then printf \'%s\\n\' "$tf_unformatted"; exit 1; fi',
                 "go build ./...", "go test ./...", "go test -race ./...", "go vet ./..."]
 
 

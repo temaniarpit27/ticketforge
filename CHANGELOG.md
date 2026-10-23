@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — local review candidate
+## 0.2.0 — prototype
 
 - Read-only assessment, separate verification/review repair limits, and human-only PR handoff.
 - Go sandbox PATH, binary-size, writable cache, and role-isolation fixes with a real Docker test.
@@ -10,5 +10,8 @@
 - Public setup, limitations, review status, and MIT license.
 - Follow-up review: reset consecutive remote failures on success, reuse reviewer caches
   per ticket/image, add gofmt/build defaults, and defer GitHub secondary rate limits.
+- Exclude vendor, testdata and hidden paths from the formatting gate; exercise exclusions
+  in the real Docker test while retaining failures for invalid/unformatted project source.
 
-Publication remains subject to external review. This is not a live-account pilot result.
+This prototype has passed local runtime tests and external code review. It is not a
+live-account pilot result.

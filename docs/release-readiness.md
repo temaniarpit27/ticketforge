@@ -1,7 +1,8 @@
-# Review candidate: 0.2.0
+# Prototype: 0.2.0
 
-This is a local review candidate. Publication waits for the owner's confirmation that the
-external review is ready. No live Jira/GitHub/model end-to-end pilot has been completed.
+External review approved prototype publication conditional on excluding vendor/testdata
+from formatting checks. That correction has regression coverage in the real Docker test.
+No live Jira/GitHub/model end-to-end pilot has been completed.
 
 ## Findings from the first review
 
@@ -39,6 +40,12 @@ remain separate. Real Docker checks cover reuse and formatting/build defaults, i
 failure on unformatted and syntactically invalid Go files. Existing profiles are not rewritten.
 GitHub secondary rate-limit responses defer without blindly repeating writes; ordinary
 permission-denied responses are not classified as rate limits.
+
+The formatting gate enumerates Go files explicitly instead of passing directories to
+gofmt. It excludes root vendor/, all testdata/ directories, and hidden paths. The Docker
+fixture contains unformatted vendor code and deliberately invalid testdata/hidden files;
+verification succeeds without changing them. Unformatted or invalid project source still fails.
+Existing profiles need their formatting command updated; generated profiles use the new gate.
 
 ## Verification boundaries
 

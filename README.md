@@ -189,8 +189,9 @@ An explicitly requested Docker test fails if its engine/image build is unavailab
 - Reviewer findings are strings. There is no stable finding ledger, two-pass rebuttal
   reconciliation, or separate advisory-note schema; valid disagreements may consume rounds.
 - New profiles check gofmt, build, test, race test, and vet. Existing profiles retain their
-  configured commands; update them deliberately. Whole-repository formatting can expose
-  preexisting problems. No baseline comparison, automatic dependency-tidy policy, or extra linter is implemented.
+  configured commands; update them deliberately. Formatting excludes root vendor/, testdata/
+  directories, and hidden paths, but can still expose preexisting problems in project source.
+  No baseline comparison, automatic dependency-tidy policy, or extra linter is implemented.
 - The base branch is fetched when creating a ticket workspace, not rebased automatically
   during repairs. Reconcile a stale base/conflicts manually and reverify/review changed code.
 - Model sessions restart after interruption. Message history is bounded with recoverable

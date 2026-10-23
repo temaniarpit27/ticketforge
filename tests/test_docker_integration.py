@@ -53,8 +53,18 @@ class DockerGoTests(unittest.TestCase):
         self.run_ok("command -v go && go version")
         self.assertIn("go version", self.sandbox.check()["output"])
         self.run_ok("gofmt -w counter.go counter_test.go")
+        ignored = {"vendor/example.com/odd/odd.go": "package  odd\n",
+                   "testdata/broken.go": "package broken\nfunc invalid(\n",
+                   "nested/testdata/broken.go": "package broken\nfunc invalid(\n",
+                   ".fixtures/broken.go": "package broken\nfunc invalid(\n"}
+        for name, contents in ignored.items():
+            path = self.workspace / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
         for command in GoAdapter().verification_commands():
             self.run_ok(command, role="verify")
+        for name, contents in ignored.items():
+            self.assertEqual((self.workspace / name).read_text(), contents)
         formatting = GoAdapter().verification_commands()[0]
         source = self.workspace / "counter.go"
         formatted = source.read_text()
