@@ -54,8 +54,10 @@ There is no mandatory human plan-approval gate: actionable assessment proceeds t
 The host holds credentials, talks to model/service APIs, and owns commits/pushes.
 Tools execute in short-lived containers with no network, credentials, writable root,
 or writable Git metadata. Assessment additionally mounts source read-only.
-Coder/reviewer use separate checkouts; coder, assessor, verifier, and reviewer caches
-are keyed by role, workspace, and image name. Image tags should be rebuilt/rotated deliberately.
+Coder/reviewer use separate checkouts. Coder, assessor, and verifier caches are keyed by
+role, workspace, and image name. Managed reviewer rounds reuse a ticket/role/image cache
+across fresh checkouts. Different tickets and roles remain isolated; unmanaged checkouts
+fall back to a path-specific key. Image tags should be rebuilt/rotated deliberately.
 Review experiments never become implementation.
 
 Repository instructions are untrusted guidance, not permission to register host plugins,
@@ -79,6 +81,10 @@ GET retries are bounded and cancellable during backoff. Model inference requests
 transient failures before tool execution and can incur duplicate inference charges.
 Other writes are not blindly retried. Coordinator remote failures defer saved work and
 eventually block after the retry budget; outbox delivery remains queued on failure.
+The counter tracks consecutive failures and resets after successful work or a PR poll,
+including observing a human merge. A reset cannot overwrite a newer specification.
+GitHub secondary rate limits are identified from Retry-After or bounded error-message parsing;
+permission-denied 403 responses stay ordinary errors. Consecutive rate limits increase waits.
 No cross-service atomicity or distributed exactly-once guarantee is claimed.
 
 See [current verification and limitations](release-readiness.md) and [extension contracts](extending.md).

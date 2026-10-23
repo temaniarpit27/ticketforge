@@ -8,5 +8,7 @@
 - Nested environment-file protection and explicit non-actionable Jira notes.
 - Tracker/code-host/language extension contracts and repository guide/skill templates.
 - Public setup, limitations, review status, and MIT license.
+- Follow-up review: reset consecutive remote failures on success, reuse reviewer caches
+  per ticket/image, add gofmt/build defaults, and defer GitHub secondary rate limits.
 
 Publication remains subject to external review. This is not a live-account pilot result.

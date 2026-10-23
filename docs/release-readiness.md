@@ -9,7 +9,7 @@ external review is ready. No live Jira/GitHub/model end-to-end pilot has been co
 |---|---|---|
 | 1 | Fixed | Non-login shell; real Docker finds and runs Go |
 | 2 | Fixed | Configurable 1 GiB file ceiling; real binary exceeds the old 64 KiB limit |
-| 3 | Fixed with retention limitation | Writable persistent role/workspace/image caches; isolation tested; no automatic quota/cleanup |
+| 3 | Fixed with retention limitation | Persistent isolated caches; reviewer rounds reuse ticket/role/image cache; no automatic quota/cleanup |
 | 4 | Fixed | Waiting PR schedule defaults to 30s; mock call-count regression |
 | 5 | Fixed with explicit bounds | Canonical task preserved; archived observations recoverable; oversized canonical input blocks |
 | 6 | Known limitation | No stable findings/rebuttal ledger or second reconciliation pass |
@@ -20,12 +20,25 @@ external review is ready. No live Jira/GitHub/model end-to-end pilot has been co
 | 11 | Fixed escape hatch | Ordinary comments remain inputs; /forge note records non-actionable notes |
 | 12 | Known limitation | Base fetched at workspace creation; no automatic rebase during repairs |
 | 13 | Improved | Go reasoning guidance added; no claim it enforces model quality |
-| 14 | Known limitation | Default test/race/vet; formatting/build/lint policy configured by operator |
+| 14 | Improved | New profiles check gofmt/build/test/race/vet; no baseline/tidy policy or extra linter |
 | 15 | Improved | Bounded safe read/model retries and deferred remote work; no prompt caching |
 | 16 | Fixed | Sensitive basename matching at any depth; nested environment-file regression |
 
 Human-only merging replaces the previous auto-merge feature. There is no production merge
 API; true auto_merge config is rejected. Jira approval commands cannot authorize anything.
+
+## Follow-up review fixes
+
+Remote retries now count consecutive failures, resetting after successful work or PR polls.
+The regression alternates more transient failures than the budget with successful polls,
+then observes a human merge. Separate checks cover work recovery, terminal-state recovery,
+and avoiding a reset against a superseded specification.
+
+Reviewer rounds retain a ticket/role/image cache across fresh clones; coder/verifier caches
+remain separate. Real Docker checks cover reuse and formatting/build defaults, including
+failure on unformatted and syntactically invalid Go files. Existing profiles are not rewritten.
+GitHub secondary rate-limit responses defer without blindly repeating writes; ordinary
+permission-denied responses are not classified as rate limits.
 
 ## Verification boundaries
 

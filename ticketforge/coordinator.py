@@ -232,6 +232,7 @@ class Coordinator:
             try:
                 if ticket["state"] == "ready":
                     self.work(ticket)
+                    self.store.remote_success(key, version)
                     return
                 if ticket["state"] == "awaiting_approval":
                     # A new specification/head bypasses the old status schedule.
@@ -244,12 +245,14 @@ class Coordinator:
                         # Schedule before I/O so failures cannot create a tight retry loop.
                         self.status_schedule[key] = (token, now + self.cfg.status_poll_seconds)
                         self.check_merge(ticket)
+                        self.store.remote_success(key, version)
             except Superseded:
                 log.info("Task %s superseded or stopped", key)
             except RemoteError as exc:
                 try:
                     retries = self.store.get(key)["data"].get("remote_retries", 0) + 1
-                    delay = exc.retry_after if isinstance(exc, RateLimited) else self.cfg.status_poll_seconds
+                    delay = (exc.retry_after * 2 ** (retries - 1)
+                             if isinstance(exc, RateLimited) else self.cfg.status_poll_seconds)
                     target = "awaiting_approval" if ticket["state"] == "awaiting_approval" else "ready"
                     if retries > self.cfg.max_remote_retries:
                         target = "blocked"

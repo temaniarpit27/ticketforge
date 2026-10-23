@@ -38,7 +38,8 @@ class GoAdapter:
         return go_dockerfile(context, has_sum)
 
     def verification_commands(self):
-        return ["go test ./...", "go test -race ./...", "go vet ./..."]
+        return ['tf_unformatted=$(gofmt -l .) && if [ -n "$tf_unformatted" ]; then printf \'%s\\n\' "$tf_unformatted"; exit 1; fi',
+                "go build ./...", "go test ./...", "go test -race ./...", "go vet ./..."]
 
 
 LANGUAGES = {"go": GoAdapter}

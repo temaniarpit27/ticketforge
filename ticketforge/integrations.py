@@ -61,6 +61,17 @@ class HTTP:
                 headers = exc.headers or {}
                 remaining = headers.get("X-RateLimit-Remaining")
                 after = headers.get("Retry-After")
+                secondary_limit = False
+                if self.base == "https://api.github.com" and exc.code in (403, 429):
+                    # Bounded classification only; never echo potentially private API bodies.
+                    try:
+                        message = json.loads(exc.read(65536)).get("message", "").lower()
+                    except (ValueError, TypeError, AttributeError):
+                        message = ""
+                    secondary_limit = bool(after) or "secondary rate limit" in message or "abuse detection" in message
+                exc.close()
+                if secondary_limit:
+                    delay = 60
                 if after:
                     try:
                         delay = float(after)
@@ -75,6 +86,8 @@ class HTTP:
                     except ValueError:
                         pass
                     raise RateLimited(max(delay, 1)) from None
+                if secondary_limit:
+                    raise RateLimited(delay if after else 60) from None
                 if delay > 30 and retry:
                     raise RateLimited(delay) from None
                 if not retryable_call or not retry or attempt + 1 >= self.max_attempts:

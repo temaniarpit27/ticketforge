@@ -86,6 +86,19 @@ class BoundaryTests(unittest.TestCase):
             load_env(path)
             self.assertEqual(os.environ["TOKEN"], "$(touch /tmp/should-never-run)")
 
+    def test_reviewer_cache_reuses_ticket_but_never_other_roles_or_tickets(self):
+        sandbox = self.sandbox()
+        root = Path(sandbox.cfg.state_dir) / "workspaces"
+        first = root / "APP-1" / "review-v1-random"
+        second = root / "APP-1" / "review-v2-other"
+        cache = sandbox.cache_dir(first, "reviewer")
+        self.assertEqual(cache, sandbox.cache_dir(second, "reviewer"))
+        self.assertNotEqual(cache, sandbox.cache_dir(first, "coder"))
+        self.assertNotEqual(cache, sandbox.cache_dir(first, "verify"))
+        self.assertNotEqual(cache, sandbox.cache_dir(root / "APP-2" / "review-v1-random", "reviewer"))
+        sandbox.cfg.sandbox_image = "other-toolchain:local"
+        self.assertNotEqual(cache, sandbox.cache_dir(first, "reviewer"))
+
     def test_auto_merge_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp:
             (Path(temp) / ".git").mkdir()

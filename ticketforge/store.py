@@ -141,6 +141,19 @@ class Store:
         with self.lock:
             return [dict(r) for r in self.db.execute("SELECT * FROM outbox WHERE sent=0 ORDER BY rowid")]
 
+    def remote_success(self, key, version):
+        """Reset a consecutive failure streak, including successful terminal observations."""
+        with self.transaction() as db:
+            ticket = self.get(key)
+            if ticket["version"] != version:
+                raise Superseded(key)
+            data = ticket["data"]
+            if data.get("remote_retries", 0) or data.get("retry_at", 0):
+                data.update(remote_retries=0, retry_at=0)
+                db.execute("UPDATE tickets SET data=? WHERE key=? AND version=?",
+                           (json.dumps(data), key, version))
+                self._event(db, key, "remote_recovered", {"version": version})
+
     def mark_sent(self, identity):
         with self.transaction() as db:
             db.execute("UPDATE outbox SET sent=1 WHERE id=?", (identity,))

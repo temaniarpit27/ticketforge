@@ -21,10 +21,11 @@ class HTTPTests(unittest.TestCase):
         http.opener = SimpleNamespace(open=open_request)
         return http, calls, sleeps
 
-    def error(self, status, **headers):
+    def error(self, status, body=None, **headers):
         msg = Message()
         for name, value in headers.items(): msg[name] = value
-        return urllib.error.HTTPError("https://api.example", status, "error", msg, None)
+        return urllib.error.HTTPError("https://api.example", status, "error", msg,
+                                      io.BytesIO(json.dumps(body or {}).encode()))
 
     def test_get_retries_transient_failure(self):
         http, calls, waits = self.http([self.error(503), {"ok": True}])
@@ -59,3 +60,30 @@ class HTTPTests(unittest.TestCase):
             if checks[0] == 2: raise Superseded("new input")
         with self.assertRaises(Superseded): http.call("GET", "/resource", guard=guard)
         self.assertEqual(len(calls), 1)
+
+    def test_github_secondary_rate_limit_uses_header_or_minute_fallback(self):
+        for headers, body, delay in (({"Retry-After": "90"}, {}, 90),
+                                      ({}, {"message": "You have exceeded a secondary rate limit."}, 60)):
+            error = self.error(403, body=body, **headers)
+            http, calls, waits = self.http([error], "https://api.github.com")
+            with self.assertRaises(RateLimited) as value:
+                http.call("GET", "/resource")
+            self.assertEqual(value.exception.retry_after, delay)
+            self.assertEqual(calls, ["GET"])
+            self.assertFalse(waits)
+
+    def test_github_permission_denied_is_not_a_secondary_limit(self):
+        error = self.error(403, body={"message": "Resource not accessible"})
+        http, calls, waits = self.http([error], "https://api.github.com")
+        with self.assertRaises(RemoteError) as value:
+            http.call("GET", "/resource")
+        self.assertNotIsInstance(value.exception, RateLimited)
+        self.assertEqual(calls, ["GET"])
+        self.assertFalse(waits)
+
+    def test_secondary_limit_does_not_repeat_a_write(self):
+        http, calls, waits = self.http([self.error(403, **{"Retry-After": "60"})], "https://api.github.com")
+        with self.assertRaises(RateLimited):
+            http.call("POST", "/mutation", {})
+        self.assertEqual(calls, ["POST"])
+        self.assertFalse(waits)
