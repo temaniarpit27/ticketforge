@@ -341,6 +341,9 @@ class Agents:
                             return args
                         trace({"role": role, "step": step, "coordinator_reply": reply})
                         outputs.append({"id": call["id"], "content": json.dumps(reply), "is_error": False})
+                        # Also pin it to the task, so trimming a long history can never drop
+                        # what the agent still has to do (for example, findings to reconcile).
+                        session.pin("Instructions from the coordinator that still apply:\n" + json.dumps(reply, ensure_ascii=False))
                         continue
                     if call["name"] == "read_observation":
                         if set(args) != {"id", "offset"} or args["id"] not in observations or type(args["offset"]) is not int or args["offset"] < 0:

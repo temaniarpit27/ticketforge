@@ -12,6 +12,11 @@
   OpenAI-compatible Chat Completions endpoint, including local servers. Coder and reviewer may share one.
 - Model call timeout is configurable per provider (default 600s, was a fixed 90s).
 - Only tickets assigned to the agent's Jira account are picked up; unassigning stops work.
+- External review fixes: first-pass reviewer findings are kept unless explicitly dropped; the
+  reviewer's verdict is checked against the combined result; advisory notes from every round
+  reach the PR; coordinator replies are pinned against history trimming; PR checks honour
+  back-off; unassigned tickets still have their open PR watched; lesson saving is retried and
+  repeat-safe; `replay_fields` lets chat providers such as DeepSeek get required fields back.
 - Less rediscovery: a `go list` package map saved per starting commit; the coder's own notes
   and the ticket's Git history passed to its next round; build caches shared across tickets
   (per role). The coder may propose repository facts; `/forge learn` keeps them, and they are

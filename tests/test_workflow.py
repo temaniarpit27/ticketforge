@@ -121,7 +121,7 @@ class WorkflowTests(unittest.TestCase):
             if role != "reviewer":
                 return original(role, workspace, task, guard, trace, on_finish)
             # A fresh blocking finding every round, so the dialogue never settles.
-            return {"status": "changes_requested", "summary": "Defect", "questions": [], "resolutions": [],
+            return {"status": "changes_requested", "summary": "Defect", "questions": [], "resolutions": [], "dropped": [],
                     "findings": [{"severity": "blocking", "file": "shipping.py", "line": 2,
                                   "problem": "Reproducible defect", "evidence": "repro"}]}
         self.c.agents.run = always_find
@@ -377,14 +377,16 @@ class WorkflowTests(unittest.TestCase):
     def test_successful_pr_poll_resets_errors_across_many_separated_blips(self):
         from ticketforge.integrations import RemoteError
         self.ready_pr()
+        wait = self.c.cfg.status_poll_seconds  # back-off after an ordinary remote error
         for i in range(self.c.cfg.max_remote_retries + 2):
+            start = 1000 + i * 10 * wait
             self.c.status_schedule = {}
-            with patch("ticketforge.coordinator.time.time", return_value=100 + i * 100):
+            with patch("ticketforge.coordinator.time.time", return_value=start):
                 with patch.object(self.c, "check_merge", side_effect=RemoteError("temporary")):
                     self.c.tick()
                 self.assertEqual(self.c.store.get(KEY)["data"]["remote_retries"], 1)
             self.c.status_schedule = {}
-            with patch("ticketforge.coordinator.time.time", return_value=131 + i * 100):
+            with patch("ticketforge.coordinator.time.time", return_value=start + wait + 1):
                 self.c.tick()
             current = self.c.store.get(KEY)
             self.assertEqual(current["state"], "awaiting_approval")

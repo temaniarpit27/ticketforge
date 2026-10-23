@@ -13,7 +13,7 @@ been tested offline and in Docker, but not yet with real accounts on a real proj
 Think of a small team: a developer, a reviewer, and you as the lead.
 
 1. **You assign a Jira ticket to the bot account.** Only assigned tickets are picked up.
-   Unassign it and the work stops.
+   Unassign it and the work stops (an already-open pull request is still watched).
 2. **The developer reads first.** The coder AI looks at the ticket and the code without
    changing anything, then posts its plan on Jira, or asks you questions and waits.
 3. **You answer on Jira.** You can add or change requirements at any time: a comment, an edit
@@ -149,13 +149,15 @@ What each provider field means:
 | `headers` | Extra non-secret headers, if the service needs any |
 | `timeout_seconds` | How long to wait for one answer (default 600; reasoning models can be slow) |
 | `max_tokens_field` | Chat format only: `max_tokens` or `max_completion_tokens`, whichever the service expects |
+| `replay_fields` | Chat format only: extra fields of the AI's reply the service needs sent back. DeepSeek's thinking mode needs `["reasoning_content"]` (it returns an error otherwise). Default: none |
 
 Good to know:
 
 - The model must support tool calling (sometimes called function calling).
 - **Same model for both roles works.** The reviewer still starts fresh, with its own copy
   of the code and no view of the coder's reasoning.
-- **Different model families catch more**, because they tend to make different mistakes.
+- **Different model families may reduce correlated errors**, since they may not share the
+  same blind spots. TicketForge has not measured this yet.
 - The planning step (assessor) uses the coder's model.
 - Reusing a built-in name (for example `anthropic`) replaces it, such as to go through a company gateway.
 
@@ -235,10 +237,15 @@ One round goes like this:
 2. **The reviewer looks at the new code fresh.** It is not shown the old problems yet, so
    it forms its own opinion first instead of just agreeing with what it said before.
 3. **Then the reviewer settles the old problems**, in the same conversation. It now sees each
-   old problem and the coder's answer (only the proof, not the coder's sales pitch), and marks
-   each one `resolved`, `withdrawn` (the coder was right), or `open` (still wrong, and why).
+   old problem (and old advisory note) and the coder's answer (only the proof, not the coder's
+   sales pitch), and marks each one `resolved`, `withdrawn` (the coder was right), or `open`
+   (still wrong, and why). Problems it found in step 2 are numbered `N1`, `N2`, … and are
+   **all kept** unless it explicitly drops one with a reason (for example "duplicate of F2");
+   simply leaving one out does not make it disappear. Its final "pass" or "changes requested"
+   must match what is still open, or it is told to correct itself.
 4. **TicketForge decides what is next.** Anything blocking still open goes back to the coder.
-   Advisory notes never cause another round; they are listed in the pull request instead.
+   Advisory notes never cause another round; every note still in force, from any round, is
+   listed in the pull request.
    When nothing blocking is left, the pull request is opened.
 5. **If they disagree, you decide, straight away.** When the coder disputes a problem and
    the reviewer, after reading the coder's proof, still says it is wrong, the ticket pauses.
@@ -247,7 +254,9 @@ One round goes like this:
    (To allow more attempts before asking you, raise `max_finding_disputes`; default 1.)
 
 `max_review_rounds` (default 3) caps the total number of rounds. Using two different models
-helps, because they tend to make different mistakes, but neither AI replaces your review.
+may help, but neither AI replaces your review. Anything TicketForge tells an agent mid-run
+(such as the old problems in step 3) is also pinned to its task, so trimming a long
+conversation can never drop it.
 
 ## What the agents remember
 

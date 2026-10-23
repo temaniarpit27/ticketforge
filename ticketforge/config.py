@@ -15,7 +15,7 @@ BUILTIN_MODEL_PROVIDERS = {
     "anthropic": {"api": "anthropic-messages", "base_url": "https://api.anthropic.com/v1", "api_key_env": "ANTHROPIC_API_KEY"},
     "openai": {"api": "openai-responses", "base_url": "https://api.openai.com/v1", "api_key_env": "OPENAI_API_KEY"},
 }
-PROVIDER_FIELDS = {"api", "base_url", "api_key_env", "auth", "headers", "timeout_seconds", "max_tokens_field"}
+PROVIDER_FIELDS = {"api", "base_url", "api_key_env", "auth", "headers", "timeout_seconds", "max_tokens_field", "replay_fields"}
 LOCAL_HOSTS = ("localhost", "127.0.0.1", "[::1]")
 
 
@@ -28,7 +28,7 @@ def provider_specs(cfg):
         if not isinstance(raw, dict) or set(raw) - PROVIDER_FIELDS:
             raise ValueError(f"Provider {name}: allowed fields are {', '.join(sorted(PROVIDER_FIELDS))}")
         spec = {"auth": DEFAULT_AUTH.get(raw.get("api")), "headers": {}, "timeout_seconds": 600,
-                "max_tokens_field": "max_tokens", "api_key_env": "", **raw}
+                "max_tokens_field": "max_tokens", "api_key_env": "", "replay_fields": [], **raw}
         if spec.get("api") not in MODEL_APIS:
             raise ValueError(f"Provider {name}: api must be one of {', '.join(MODEL_APIS)}")
         url = spec.get("base_url")
@@ -45,9 +45,15 @@ def provider_specs(cfg):
             raise ValueError(f"Provider {name}: headers must map strings to strings (never put secrets here)")
         if type(spec["timeout_seconds"]) is not int or spec["timeout_seconds"] < 1:
             raise ValueError(f"Provider {name}: timeout_seconds must be a positive integer")
+        # Chat format only: extra fields of the AI's reply that this service needs sent back
+        # (DeepSeek's thinking mode requires "reasoning_content" with tool calls).
+        if not isinstance(spec["replay_fields"], list) or any(
+                not isinstance(f, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", f) or f in ("role", "content", "tool_calls")
+                for f in spec["replay_fields"]):
+            raise ValueError(f"Provider {name}: replay_fields must list extra reply field names such as reasoning_content")
         if spec["max_tokens_field"] not in ("max_tokens", "max_completion_tokens"):
             raise ValueError(f"Provider {name}: max_tokens_field must be max_tokens or max_completion_tokens")
-        specs[name] = {**spec, "headers": dict(spec["headers"])}
+        specs[name] = {**spec, "headers": dict(spec["headers"]), "replay_fields": list(spec["replay_fields"])}
     return specs
 
 

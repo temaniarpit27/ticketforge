@@ -95,6 +95,34 @@ class SchedulerTests(Base):
         self.c.tick()
         self.assertEqual((self.checked, self.worked), (["APP-1"], ["APP-2"]))
 
+    def test_waiting_pr_respects_rate_limit_back_off(self):
+        # From the external review: a 600 s back-off at t=1000 must not be checked at t=1121.
+        from unittest.mock import patch
+        from ticketforge.integrations import RateLimited
+        self.add("APP-1", state="awaiting_approval")
+        calls = []
+
+        def limited(ticket):
+            calls.append(ticket["key"])
+            if len(calls) == 1:
+                raise RateLimited(600)
+        self.c.check_merge = limited
+        every = self.c.cfg.status_poll_seconds
+        for wall, mono, expected in ((1000, 0, 1), (1000 + every + 1, every + 1, 1), (1601, 700, 2)):
+            with patch("ticketforge.coordinator.time.time", return_value=wall), \
+                 patch("ticketforge.coordinator.time.monotonic", return_value=mono):
+                self.c.tick()
+            self.assertEqual(len(calls), expected, (wall, mono))
+        self.assertEqual(self.c.store.get("APP-1")["state"], "awaiting_approval")
+
+    def test_back_off_survives_restart(self):
+        import time as clock
+        self.add("APP-1", state="awaiting_approval")
+        self.c.store.update("APP-1", 1, retry_at=clock.time() + 600)
+        self.c.status_schedule.clear()  # as after a restart: nothing scheduled in memory
+        self.c.tick()
+        self.assertEqual(self.checked, [])
+
     def test_nothing_ready_does_nothing(self):
         self.add("APP-1", state="waiting_input")
         self.add("APP-2", state="awaiting_approval")

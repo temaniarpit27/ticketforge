@@ -19,14 +19,20 @@ log = logging.getLogger(__name__)
 
 
 def save_lessons(path, key, lessons):
-    """Append approved lessons to the project guide under one heading, one line each."""
+    """Append approved lessons to the project guide under one heading, one line each.
+
+    Lines already present are skipped, so calling it again after a crash adds nothing twice."""
     heading = LEARNED_HEADING
     text = path.read_text() if path.is_file() else ""
+    lines = [f"- {' '.join(lesson.split())} ({key})" for lesson in lessons]
+    lines = [line for line in lines if line not in text.splitlines()]
+    if not lines:
+        return
     if heading not in text:
         text = text.rstrip("\n") + ("\n\n" if text else "") + heading + "\n\n"
     elif not text.endswith("\n"):
         text += "\n"
-    text += "".join(f"- {' '.join(lesson.split())} ({key})\n" for lesson in lessons)
+    text += "".join(line + "\n" for line in lines)
     # Write to a temporary file first, so a crash never leaves a half-written guide.
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(text)
@@ -292,7 +298,9 @@ class Coordinator:
         hit a blocker (already reported on Jira)."""
         prior = review.for_reconcile(ledger)
         prior_ids = [item["id"] for item in prior]
-        phase = {"reconciling": False}
+        severity = {item["id"]: item["severity"] for item in prior}
+        # first: the independent pass's findings, numbered N1, N2, ...; final: the combined result.
+        phase = {"reconciling": False, "first": [], "final": None}
 
         # Called each time the reviewer calls finish. The first call ends the independent pass;
         # returning the old findings keeps the SAME conversation going to settle them, so the
@@ -301,14 +309,27 @@ class Coordinator:
             if result["status"] in ("needs_input", "blocked"):
                 return None
             if not phase["reconciling"]:
-                if result["resolutions"]:
-                    raise ValueError("The first pass is independent: leave resolutions empty; prior findings come next")
+                if result["resolutions"] or result["dropped"]:
+                    raise ValueError("The first pass is independent: leave resolutions and dropped empty; prior findings come next")
+                review.check_verdict(result["status"], any(f["severity"] == "blocking" for f in result["findings"]))
                 if not prior:
                     return None
                 phase["reconciling"] = True
+                phase["first"] = [{"id": f"N{i + 1}", **f} for i, f in enumerate(result["findings"])]
                 return {"phase": "reconcile", "instructions": review.RECONCILE_INSTRUCTIONS,
-                        "prior_findings": prior, "your_independent_findings": result["findings"]}
+                        "prior_findings": prior, "your_independent_findings": phase["first"]}
             review.require_ids(result["resolutions"], prior_ids, "resolutions (one per prior finding)")
+            dropped = [d["id"] for d in result["dropped"]]
+            first_ids = [f["id"] for f in phase["first"]]
+            if len(dropped) != len(set(dropped)) or not set(dropped) <= set(first_ids):
+                raise ValueError(f"dropped may only name your first-pass findings ({', '.join(first_ids) or 'none'}), once each")
+            # Every first-pass finding stays unless explicitly dropped with evidence.
+            kept = [{k: v for k, v in f.items() if k != "id"} for f in phase["first"] if f["id"] not in dropped]
+            findings = kept + result["findings"]
+            blocking = (any(f["severity"] == "blocking" for f in findings) or
+                        any(r["status"] == "open" and severity[r["id"]] == "blocking" for r in result["resolutions"]))
+            review.check_verdict(result["status"], blocking)
+            phase["final"] = {**result, "findings": findings}
             return None
 
         reviewer_workspace = self.repo.review_workspace(key, workspace, head, version)
@@ -328,7 +349,7 @@ class Coordinator:
         self.boundary(key, version)
         if self.result(key, version, "reviewer", reviewed):
             return None
-        return reviewed
+        return phase["final"] or reviewed
 
     def repo_map(self, workspace, base, project_context):
         """A package map of the repository at the ticket's starting commit.
@@ -397,16 +418,37 @@ class Coordinator:
         Lessons are only kept for merged work, and only the ones a human approved on Jira,
         because whatever is in the guide is read by every future agent run."""
         self.store.merged(key, sha, url)
-        data = self.store.get(key)["data"]
+        try:
+            self.save_pending_lessons(self.store.get(key))
+        except OSError:
+            log.exception("Could not save lessons for %s; will retry", key)
+
+    def save_pending_lessons(self, ticket):
+        """Write a merged ticket's approved lessons to the project guide, once.
+
+        Safe to repeat: tick() retries it until it succeeds, and save_lessons() skips lines
+        already in the file, so a crash between writing and recording never duplicates them."""
+        key, data = ticket["key"], ticket["data"]
         approved = data.get("lessons_approved") or []
-        if not approved or data.get("lessons_saved"):
+        if ticket["state"] != "merged" or not approved or data.get("lessons_saved"):
             return
         if not self.cfg.project_guide:
+            self.store.annotate(key, lessons_saved=True)
             self.post(key, "lessons", "Approved notes were not saved: set project_guide in the profile to keep them.")
             return
         save_lessons(Path(self.cfg.project_guide), key, approved)
         self.store.annotate(key, lessons_saved=True)
         self.post(key, "lessons", f"Saved {len(approved)} note(s) to the project guide; future tickets will read them.")
+
+    def observe_pr(self, ticket):
+        """Watch the PR of a ticket the agent no longer works on (unassigned): only detect merge
+        or close. Nothing else changes, and no Jira input is acted on."""
+        pr = self.github.pr(ticket["data"]["pr"])
+        if pr.get("merged"):
+            self.record_merge(ticket["key"], pr.get("merge_commit_sha"), pr["html_url"])
+        elif pr["state"] != "open":
+            self.store.finish(ticket["key"], "closed")
+            self.post(ticket["key"], f"closed:{pr['number']}", "PR was closed without merging. This run is closed; use a new ticket for follow-up work.")
 
     def check_merge(self, ticket):
         """Observe a waiting PR: report checks/reviews on Jira and detect the human's merge or
@@ -452,13 +494,28 @@ class Coordinator:
 
         Errors are handled per ticket, so one failing ticket never stops the others.
         """
+        now = time.time()
         for ticket in self.store.all():
             if self.stop.is_set():
                 return
+            # Respect a back-off after a rate limit or outage (saved, so it survives restarts).
+            if ticket["data"].get("retry_at", 0) > now:
+                continue
             if ticket["state"] == "awaiting_approval" and self.pr_check_due(ticket):
                 self.attempt(ticket, self.check_merge)
+            elif ticket["state"] == "unassigned" and ticket["data"].get("pr") and self.pr_check_due(ticket):
+                # No more work on it, but a PR that is already open is still watched, so its
+                # merge or close is detected and reported.
+                self.attempt(ticket, self.observe_pr)
         if self.stop.is_set():
             return
+        # Finish any lesson saving that failed earlier (for example, the disk was full).
+        for ticket in self.store.all():
+            if ticket["state"] == "merged" and ticket["data"].get("lessons_approved") and not ticket["data"].get("lessons_saved"):
+                try:
+                    self.save_pending_lessons(ticket)
+                except OSError:
+                    log.exception("Could not save lessons for %s; will retry", ticket["key"])
         chosen = self.next_ticket(self.store.all())
         if chosen:
             # Remember the choice, so after a restart the worker continues the same ticket.

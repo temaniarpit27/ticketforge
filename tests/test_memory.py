@@ -127,6 +127,33 @@ class LessonTests(Base):
         self.merge()
         self.assertIn("set project_guide", self.posts())
 
+    def test_failed_lesson_write_is_retried_after_merge(self):
+        # From the external review: a write failure after merge was never retried.
+        from unittest.mock import patch
+        import ticketforge.coordinator as coordinator
+        self.propose_lessons()
+        self.say("Use a threshold of 150.")
+        self.c.tick()
+        self.say("/forge learn 1")
+        real = coordinator.save_lessons
+        with patch.object(coordinator, "save_lessons", side_effect=OSError("disk full")):
+            self.merge()
+        self.assertEqual(self.c.store.get(KEY)["state"], "merged")
+        self.assertNotIn(LESSONS[0], self.guide.read_text())
+        with patch.object(coordinator, "save_lessons", side_effect=real) as saver:
+            self.c.tick()
+            self.c.tick()
+        self.assertEqual(saver.call_count, 1)  # retried once, then recorded as done
+        self.assertEqual(self.guide.read_text().count(LESSONS[0]), 1)
+        self.assertTrue(self.c.store.get(KEY)["data"]["lessons_saved"])
+
+    def test_crash_between_write_and_record_does_not_duplicate(self):
+        save_lessons(self.guide, KEY, [LESSONS[0]])
+        save_lessons(self.guide, KEY, [LESSONS[0], LESSONS[1]])  # the retry after a crash
+        text = self.guide.read_text()
+        self.assertEqual(text.count(LESSONS[0]), 1)
+        self.assertEqual(text.count(LESSONS[1]), 1)
+
     def test_save_lessons_keeps_one_heading_and_one_line_each(self):
         save_lessons(self.guide, "APP-1", ["first\nline"])
         save_lessons(self.guide, "APP-2", ["second"])

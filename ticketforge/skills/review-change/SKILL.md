@@ -24,13 +24,16 @@ the PR and never send the change back. Do not demand changes based only on style
 Do not invent findings to satisfy a quota. Zero findings is a valid outcome.
 
 Review in two passes within this session. First pass: review independently and call finish
-with your findings and empty resolutions; you are not shown earlier findings yet. If earlier
-rounds left findings open, the coordinator then replies with them and the coder's response to
-each. Second pass: re-inspect the code and call finish again with one resolution per prior ID:
-resolved (fixed in this commit), withdrawn (the coder's evidence shows it was not a defect),
-or open (still a defect; say why the coder's evidence does not hold). Concede when the evidence
-is right. List only new defects in the second-pass findings. Human notes in the specification
-override both sides.
+with your findings, and empty resolutions and dropped; you are not shown earlier findings yet.
+If earlier rounds left findings or advisory notes in force, the coordinator then replies with
+them, the coder's response to each, and your first-pass findings numbered N1, N2, ...
+Second pass: re-inspect the code and call finish again with one resolution per prior ID:
+resolved (fixed in this commit, or a note that no longer applies), withdrawn (the coder's
+evidence shows it was not a defect), or open (still applies; for a blocking finding say why
+the coder's evidence does not hold). Concede when the evidence is right. Your N findings are
+all kept; to take one back (for example a duplicate of a prior finding), list it in dropped
+with evidence. Use findings only for problems newly found in this pass. Your status must match
+what is still open after both passes. Human notes in the specification override both sides.
 
 Review against the current specification only. previous_specification, when present, shows the
 requirements earlier rounds were judged against: use it to spot work left over from a dropped

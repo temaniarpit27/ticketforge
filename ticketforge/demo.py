@@ -134,7 +134,7 @@ class DemoAgents:
         result = {"summary": "Implemented threshold behavior and verified boundary cases.", "questions": []}
         if not notes:
             question = {**result, "status": "needs_input", "questions": ["What subtotal qualifies for free shipping?"]}
-            question.update({"coder": {"responses": [], "notes": "", "lessons": []}, "reviewer": {"findings": [], "resolutions": []}}.get(role, {}))
+            question.update({"coder": {"responses": [], "notes": "", "lessons": []}, "reviewer": {"findings": [], "resolutions": [], "dropped": []}}.get(role, {}))
             return question
         threshold = 150 if any("150" in n["text"] for n in notes) else 100
         if role == "assessor":
@@ -159,13 +159,16 @@ class DemoAgents:
             "severity": "blocking", "file": "shipping.py", "line": 2,
             "problem": f"subtotal exactly {threshold} is charged 10, but the requirement says free at the threshold.",
             "evidence": f"shipping_cost({threshold}) returns 10; use an inclusive comparison and test the boundary."}]
-        first = {**result, "status": "pass" if inclusive else "changes_requested", "findings": findings, "resolutions": []}
+        first = {**result, "status": "pass" if inclusive else "changes_requested", "findings": findings, "resolutions": [], "dropped": []}
 
         def reconcile(reply):
             resolutions = [{"id": f["id"], "status": "resolved" if inclusive else "open",
                             "evidence": "Boundary now free." if inclusive else "Still exclusive."} for f in reply["prior_findings"]]
-            # The independent finding duplicates a prior one, so it is not listed again.
-            return {**result, "status": "pass" if inclusive else "changes_requested", "findings": [], "resolutions": resolutions}
+            # Its independent finding repeats the prior one, so it drops it explicitly as a duplicate.
+            dropped = [{"id": f["id"], "evidence": "Duplicate of " + reply["prior_findings"][0]["id"]}
+                       for f in reply["your_independent_findings"]]
+            return {**result, "status": "pass" if inclusive else "changes_requested", "findings": [],
+                    "resolutions": resolutions, "dropped": dropped}
 
         return self.finish(role, first, on_finish, reconcile)
 

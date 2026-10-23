@@ -130,7 +130,7 @@ class BoundaryTests(unittest.TestCase):
             if len(requests) == 1:
                 return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "one", "name": "shell", "input": {"command": "ls"}}]}
             return {"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "two", "name": "finish", "input": {
-                "status": "pass", "summary": "No actionable findings", "questions": [], "findings": [], "resolutions": []}}]}
+                "status": "pass", "summary": "No actionable findings", "questions": [], "findings": [], "resolutions": [], "dropped": []}}]}
         agents.clients = {"anthropic": SimpleNamespace(call=call)}
         result = agents.run("reviewer", Path("/unused"), {"specification": "task"}, lambda: None, lambda e: None)
         self.assertEqual(result["status"], "pass")

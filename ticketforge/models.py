@@ -58,6 +58,10 @@ class AnthropicSession:
                  for b in content if b.get("type") == "tool_use"]
         return Turn(calls, result, stopped)
 
+    def pin(self, text):
+        """Add text to the task message, which history trimming never removes."""
+        self.messages[0]["content"] += "\n\n" + text
+
     def respond(self, outputs):
         self.messages.append({"role": "assistant", "content": self.pending})
         self.messages.append({"role": "user", "content": [
@@ -104,6 +108,10 @@ class OpenAIResponsesSession:
                  for item in output if item.get("type") == "function_call"]
         return Turn(calls, result, stopped)
 
+    def pin(self, text):
+        """Add text to the task message, which history trimming never removes."""
+        self.task += "\n\n" + text
+
     def respond(self, outputs):
         self.turns.append(list(self.pending) + [
             {"type": "function_call_output", "call_id": o["id"],
@@ -118,6 +126,7 @@ class OpenAIChatSession:
     def __init__(self, http, model, system, tools, task, max_tokens, limit, spec=None):
         self.http, self.model, self.system, self.max_tokens, self.limit = http, model, system, max_tokens, limit
         self.max_tokens_field = (spec or {}).get("max_tokens_field", "max_tokens")
+        self.replay_fields = (spec or {}).get("replay_fields", [])
         self.tools = [{"type": "function", "function": {"name": t["name"], "description": t["description"],
                                                         "parameters": t["input_schema"]}} for t in tools]
         self.task = task
@@ -134,11 +143,17 @@ class OpenAIChatSession:
         reason = choice.get("finish_reason")
         stopped = "truncated" if reason == "length" else ("refused" if reason == "content_filter" or message.get("refusal") else None)
         tool_calls = message.get("tool_calls") or []
-        # Replay only the portable fields; vendor extras such as reasoning text are not resent.
-        self.pending = {"role": "assistant", "content": message.get("content"), **({"tool_calls": tool_calls} if tool_calls else {})}
+        # Send back the portable fields, plus any the provider requires (replay_fields). Other
+        # vendor extras are dropped, because some services reject fields they do not know.
+        self.pending = {"role": "assistant", "content": message.get("content"), **({"tool_calls": tool_calls} if tool_calls else {}),
+                        **{name: message[name] for name in self.replay_fields if name in message}}
         calls = [{"id": c["id"], "name": c["function"]["name"], "input": _arguments(c["function"].get("arguments"))}
                  for c in tool_calls if c.get("type", "function") == "function"]
         return Turn(calls, result, stopped)
+
+    def pin(self, text):
+        """Add text to the task message, which history trimming never removes."""
+        self.task += "\n\n" + text
 
     def respond(self, outputs):
         self.turns.append([self.pending] + [

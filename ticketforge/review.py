@@ -26,6 +26,12 @@ RESPONSE_SCHEMA = {"type": "object", "properties": {
     "evidence": {"type": "string"},
 }, "required": ["id", "action", "evidence"], "additionalProperties": False}
 
+# A first-pass finding the reviewer takes back in its second pass (retracted, or a duplicate
+# of an earlier finding). Anything not listed here is kept: omission never drops a finding.
+DROPPED_SCHEMA = {"type": "object", "properties": {
+    "id": {"type": "string"}, "evidence": {"type": "string"},
+}, "required": ["id", "evidence"], "additionalProperties": False}
+
 RESOLUTION_SCHEMA = {"type": "object", "properties": {
     "id": {"type": "string"}, "status": {"type": "string", "enum": list(RESOLUTIONS)},
     "evidence": {"type": "string"},
@@ -42,13 +48,16 @@ STATUSES = {
 }
 
 RECONCILE_INSTRUCTIONS = (
-    "Your independent pass is recorded. Now reconcile earlier findings from previous review rounds. "
+    "Your independent pass is recorded; its findings are listed with ids N1, N2, ... and are all KEPT. "
+    "Now reconcile earlier findings from previous review rounds (blocking ones and advisory notes). "
     "For each prior finding, inspect the current code and the coder's response, then call finish again with "
-    "one resolution per prior finding id: resolved (fixed in this commit), withdrawn (the coder's evidence shows "
-    "it was not a defect), or open (still a defect; explain why the coder's evidence does not hold). "
+    "one resolution per prior finding id: resolved (fixed in this commit, or for a note: no longer applies), "
+    "withdrawn (the coder's evidence shows it was not a defect), or open (still applies; for a blocking finding "
+    "explain why the coder's evidence does not hold). "
+    "To take back one of your own N findings, list it in dropped with evidence, for example 'duplicate of F2'; "
+    "leaving it out does not drop it. Use findings only for additional new problems found in this pass. "
     "Human decisions in the specification notes override both sides. If the requirements changed "
-    "(see previous_specification), withdraw findings that no longer apply. In findings, list only new defects: "
-    "drop any of your independent findings that duplicate a prior finding.")
+    "(see previous_specification), withdraw findings that no longer apply.")
 
 
 def finish_schema(role):
@@ -65,6 +74,7 @@ def finish_schema(role):
     if role == "reviewer":
         properties["findings"] = {"type": "array", "items": FINDING_SCHEMA}
         properties["resolutions"] = {"type": "array", "items": RESOLUTION_SCHEMA}
+        properties["dropped"] = {"type": "array", "items": DROPPED_SCHEMA}
     return {"type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}
 
 
@@ -110,18 +120,23 @@ def validate_finish(role, args):
         _check_object(item, FINDING_SCHEMA, "finding")
     for item in args.get("resolutions", []):
         _check_object(item, RESOLUTION_SCHEMA, "resolution")
+    for item in args.get("dropped", []):
+        _check_object(item, DROPPED_SCHEMA, "dropped")
     if status == "needs_input" and not args["questions"]:
         raise ValueError("needs_input requires concrete questions")
     if status in ("ready", "pass", "changes_requested") and args["questions"]:
         raise ValueError("Unanswered questions require needs_input")
-    if role == "reviewer" and status in ("pass", "changes_requested"):
-        blocking = (any(f["severity"] == "blocking" for f in args["findings"]) or
-                    any(r["status"] == "open" for r in args["resolutions"]))
-        if status == "pass" and blocking:
-            raise ValueError("pass cannot include blocking findings or open resolutions")
-        if status == "changes_requested" and not blocking:
-            raise ValueError("changes_requested requires a blocking finding or an open resolution")
     return args
+
+
+def check_verdict(status, blocking):
+    """The reviewer's own word must match what remains: changes_requested only when something
+    blocking is still open, pass only when nothing is. Checked by the coordinator on the
+    combined result of both review passes."""
+    if status == "pass" and blocking:
+        raise ValueError("pass cannot leave a blocking finding open (including kept first-pass findings)")
+    if status == "changes_requested" and not blocking:
+        raise ValueError("changes_requested needs a blocking finding that is still open")
 
 
 def require_ids(items, expected, label):
@@ -155,10 +170,16 @@ def for_coder(ledger):
              "evidence": i["evidence"], "reviewer_latest": i.get("reviewer_latest", "")} for i in open_findings(ledger)]
 
 
+def advisory_findings(ledger):
+    return _ordered(ledger, ("advisory",))
+
+
 def for_reconcile(ledger):
-    """Open findings with the coder's per-finding evidence. Never includes the coder's summary."""
-    return [{"id": i["id"], "file": i["file"], "line": i["line"], "problem": i["problem"],
-             "evidence": i["evidence"], "coder_response": i.get("coder_latest")} for i in open_findings(ledger)]
+    """Findings still in force (open blocking ones and advisory notes) with the coder's
+    per-finding evidence, for the reviewer's second pass. Never includes the coder's summary."""
+    return [{"id": i["id"], "severity": i["severity"], "file": i["file"], "line": i["line"], "problem": i["problem"],
+             "evidence": i["evidence"], "coder_response": i.get("coder_latest")}
+            for i in _ordered(ledger, ("open", "advisory"))]
 
 
 def record_coder(ledger, responses, round_number):
@@ -176,7 +197,10 @@ def reopen_escalated(ledger, version):
 
 
 def apply_review(ledger, review, round_number, max_disputes):
-    """Record the reviewer's verdict. Returns (open blocking, newly escalated, new advisories)."""
+    """Record the reviewer's verdict. Returns (open blocking, newly escalated, advisory notes).
+
+    Advisory notes are every note still in force, from any round, so none silently
+    disappears from the PR; the reviewer resolves or withdraws notes that no longer apply."""
     escalated = []
     for resolution in review["resolutions"]:
         item = ledger["items"][resolution["id"]]
@@ -186,12 +210,13 @@ def apply_review(ledger, review, round_number, max_disputes):
         if resolution["status"] != "open":
             item["status"] = resolution["status"]
             continue
+        if item["status"] == "advisory":
+            continue  # still applies; a note never blocks or escalates
         if (item.get("coder_latest") or {}).get("action") == "disputed":
             item["disputes"] += 1
         if item["disputes"] >= max_disputes:
             item["status"] = "escalated"
             escalated.append(item)
-    advisories = []
     for finding in review["findings"]:
         identity = f"F{ledger['next']}"
         ledger["next"] += 1
@@ -199,9 +224,7 @@ def apply_review(ledger, review, round_number, max_disputes):
         item = {"id": identity, **finding, "status": status, "disputes": 0, "reviewer_latest": finding["evidence"],
                 "history": [{"round": round_number, "actor": "reviewer", "action": "raised", "evidence": finding["evidence"]}]}
         ledger["items"][identity] = item
-        if status == "advisory":
-            advisories.append(item)
-    return open_findings(ledger), escalated, advisories
+    return open_findings(ledger), escalated, advisory_findings(ledger)
 
 
 def describe(item):

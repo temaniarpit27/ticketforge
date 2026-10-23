@@ -46,6 +46,10 @@ coordinator records the spec each coding and review round used (`worked_specific
 `reviewed_specification`) and gives agents the older one as `previous_specification`, so they
 can drop obsolete work and withdraw findings that no longer apply.
 
+An unassigned ticket with an open PR is still observed (`observe_pr`): merge or close is
+recorded, nothing else. Back-off (`retry_at`) applies to PR checks as well as coding work.
+Approved lessons are saved by a retryable, repeat-safe job (`save_pending_lessons`).
+
 Unassigning stops any agent state (`ready` through `blocked`) and bumps the version so an
 in-flight model run is discarded. An open PR (`awaiting_approval`) keeps being tracked.
 
@@ -77,8 +81,11 @@ specification versions. Each finding is `open`, `resolved`, `withdrawn`, `adviso
 | Decide | coordinator | ledger | publish, return to coder, or escalate to Jira |
 
 The second reviewer pass is a `finish` hook: the coordinator answers the first `finish` call
-with the prior findings as the tool result, so the reviewer's first look is provably
-independent. A reviewer `open` after a coder `disputed` counts as one dispute; at
+with the prior findings (open blocking ones and advisory notes) as the tool result, so the
+reviewer's first look is provably independent. The reply is also pinned to the task message,
+so history compaction cannot drop it. First-pass findings are numbered `N1…` and kept unless
+listed in `dropped` with evidence; the coordinator merges them with second-pass findings and
+checks the reviewer's verdict against the combined result (`review.check_verdict`). A reviewer `open` after a coder `disputed` counts as one dispute; at
 `max_finding_disputes` (default 1, so the first disagreement) the finding is escalated with both sides' evidence on Jira. Human input
 creates a new version, which reopens escalated findings with fresh dispute counts.
 

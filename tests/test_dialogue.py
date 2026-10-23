@@ -116,7 +116,7 @@ class DialogueTests(Base):
         def run(role, workspace, task, guard, trace, on_finish=None):
             if role != "reviewer":
                 return original(role, workspace, task, guard, trace, on_finish)
-            result = {"status": "pass", "summary": "Correct", "questions": [], "resolutions": [], "findings": [
+            result = {"status": "pass", "summary": "Correct", "questions": [], "resolutions": [], "dropped": [], "findings": [
                 {"severity": "advisory", "file": "shipping.py", "line": 1, "problem": "Name the threshold constant", "evidence": "magic number"}]}
             self.assertIsNone(on_finish(result))
             return result
@@ -134,7 +134,7 @@ class DialogueTests(Base):
 
         def run(role, workspace, task, guard, trace, on_finish=None):
             if role == "reviewer":
-                early = {"status": "pass", "summary": "s", "questions": [], "findings": [],
+                early = {"status": "pass", "summary": "s", "questions": [], "findings": [], "dropped": [],
                          "resolutions": [{"id": "F1", "status": "resolved", "evidence": "guess"}]}
                 with self.assertRaisesRegex(ValueError, "first pass is independent"):
                     on_finish(early)
@@ -142,6 +142,121 @@ class DialogueTests(Base):
         self.c.agents.run = run
         self.c.tick()
         self.assertEqual(self.state(), "awaiting_approval")
+
+
+class ReconciliationSafetyTests(Base):
+    """Regressions: nothing the reviewer found may silently disappear between its two passes."""
+
+    def scripted_reviewer(self, rounds):
+        # rounds: one (first_pass, second_pass) per review; second_pass gets the coordinator's reply.
+        original = self.c.agents.run
+
+        def run(role, workspace, task, guard, trace, on_finish=None):
+            if role != "reviewer":
+                return original(role, workspace, task, guard, trace, on_finish)
+            first, second = rounds.pop(0)
+            reply = on_finish(first)
+            if reply is None:
+                return first
+            final = second(reply)
+            self.assertIsNone(on_finish(final))
+            return final
+        self.c.agents.run = run
+
+    def result(self, status, findings=(), resolutions=(), dropped=()):
+        return {"status": status, "summary": "s", "questions": [], "findings": list(findings),
+                "resolutions": list(resolutions), "dropped": list(dropped)}
+
+    def finding(self, severity, problem):
+        return {"severity": severity, "file": "shipping.py", "line": 2, "problem": problem, "evidence": "repro"}
+
+    def resolve_all(self, reply, status="resolved"):
+        return [{"id": p["id"], "status": status, "evidence": "checked"} for p in reply["prior_findings"]]
+
+    def test_first_pass_finding_left_out_of_second_pass_is_kept(self):
+        self.start()
+        new_bug = self.finding("blocking", "Negative subtotal is not rejected")
+        self.scripted_reviewer([
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged")]), None),
+            # The second pass resolves F1 but simply leaves out its own new finding N1.
+            (self.result("changes_requested", [new_bug]),
+             lambda reply: self.result("changes_requested", resolutions=self.resolve_all(reply))),
+        ])
+        self.c.tick()
+        self.c.tick()
+        self.assertEqual(self.state(), "ready")
+        self.assertIsNone(self.c.github.record)
+        self.assertEqual(self.ledger()["F2"]["problem"], "Negative subtotal is not rejected")
+        self.assertEqual(self.ledger()["F2"]["status"], "open")
+
+    def test_pass_that_ignores_a_kept_first_pass_finding_is_rejected(self):
+        # The reproduction from the external review: resolve the old finding, omit the new
+        # one, and say pass. The coordinator refuses; no PR is raised.
+        self.start()
+        self.scripted_reviewer([
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged")]), None),
+            (self.result("changes_requested", [self.finding("blocking", "Negative subtotal is not rejected")]),
+             lambda reply: self.result("pass", resolutions=self.resolve_all(reply))),
+        ])
+        self.c.tick()
+        self.c.tick()
+        self.assertIsNone(self.c.github.record)
+        self.assertIn("pass cannot leave a blocking finding open", self.c.store.get(KEY)["data"]["error"])
+
+    def test_first_pass_finding_dropped_with_evidence_is_removed(self):
+        self.start()
+        self.scripted_reviewer([
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged")]), None),
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged again")]),
+             lambda reply: self.result("pass", resolutions=self.resolve_all(reply),
+                                       dropped=[{"id": "N1", "evidence": "Duplicate of F1, now fixed"}])),
+        ])
+        self.c.tick()
+        self.c.tick()
+        self.assertEqual(self.state(), "awaiting_approval")
+        self.assertNotIn("F2", self.ledger())
+
+    def test_unknown_dropped_id_is_rejected(self):
+        self.start()
+        self.scripted_reviewer([
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged")]), None),
+            (self.result("pass"), lambda reply: self.result("pass", resolutions=self.resolve_all(reply),
+                                                           dropped=[{"id": "N7", "evidence": "?"}])),
+        ])
+        self.c.tick()
+        # A real model would get this rejection back as a tool error and correct itself;
+        # the scripted reviewer cannot, so the round stops with the reason recorded.
+        self.c.tick()
+        self.assertEqual(self.state(), "blocked")
+        self.assertIn("dropped may only name", self.c.store.get(KEY)["data"]["error"])
+
+    def test_advisory_notes_from_every_round_reach_the_pr_until_withdrawn(self):
+        self.start()
+        self.scripted_reviewer([
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged"),
+                                               self.finding("advisory", "Name the threshold constant")]), None),
+            (self.result("pass"), lambda reply: self.result("pass", resolutions=[
+                {"id": p["id"], "status": "resolved" if p["severity"] == "blocking" else "open", "evidence": "checked"}
+                for p in reply["prior_findings"]])),
+        ])
+        self.c.tick()
+        self.c.tick()
+        self.assertEqual(self.state(), "awaiting_approval")
+        self.assertIn("Name the threshold constant", self.bodies[-1])
+        self.assertEqual(self.ledger()["F2"]["status"], "advisory")
+
+    def test_withdrawn_advisory_is_left_out_of_the_pr(self):
+        self.start()
+        self.scripted_reviewer([
+            (self.result("changes_requested", [self.finding("blocking", "Boundary charged"),
+                                               self.finding("advisory", "Name the threshold constant")]), None),
+            (self.result("pass"), lambda reply: self.result("pass", resolutions=self.resolve_all(reply))),
+        ])
+        self.c.tick()
+        self.c.tick()
+        self.assertEqual(self.state(), "awaiting_approval")
+        self.assertNotIn("Advisory notes", self.bodies[-1])
+        self.assertIn("F2 resolved: Name the threshold constant", self.bodies[-1])
 
 
 class AssignmentTests(Base):
@@ -199,6 +314,36 @@ class AssignmentTests(Base):
         self.c.github.human_merge(1, self.c.store.get(KEY)["data"]["head"])
         self.c.tick()
         self.assertEqual(self.state(), "merged")
+
+
+class UnassignedPrTests(Base):
+    """From the external review: unassigning must stop work, not stop watching an open PR."""
+
+    def raise_pr_then_unassign_and_comment(self):
+        self.start("Use a threshold of 150.")
+        self.c.tick()
+        self.assertEqual(self.state(), "awaiting_approval")
+        self.c.jira.assigned = False
+        self.c.jira.say("Actually also handle free shipping for members.")
+        self.c.poll()
+        self.assertEqual(self.state(), "unassigned")
+        self.c.status_schedule.clear()
+
+    def test_merge_is_still_detected(self):
+        self.raise_pr_then_unassign_and_comment()
+        calls = len(self.c.agents.calls)
+        self.c.github.human_merge(1, self.c.store.get(KEY)["data"]["head"])
+        self.c.tick()
+        self.assertEqual(self.state(), "merged")
+        self.assertEqual(len(self.c.agents.calls), calls)  # no new work was done
+        self.assertIn("Merged:", self.posts())
+
+    def test_close_is_still_detected(self):
+        self.raise_pr_then_unassign_and_comment()
+        self.c.github.record.update(state="closed")
+        self.c.tick()
+        self.assertEqual(self.state(), "closed")
+        self.assertIn("closed without merging", self.posts())
 
 
 class RequirementChangeTests(Base):

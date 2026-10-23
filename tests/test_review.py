@@ -7,17 +7,24 @@ def finding(severity="blocking", problem="Boundary charged"):
     return {"severity": severity, "file": "shipping.py", "line": 2, "problem": problem, "evidence": "repro"}
 
 
-def reviewer(status, findings=(), resolutions=()):
-    return {"status": status, "summary": "s", "questions": [], "findings": list(findings), "resolutions": list(resolutions)}
+def reviewer(status, findings=(), resolutions=(), dropped=()):
+    return {"status": status, "summary": "s", "questions": [], "findings": list(findings),
+            "resolutions": list(resolutions), "dropped": list(dropped)}
 
 
 class ValidationTests(unittest.TestCase):
-    def test_reviewer_status_must_match_findings(self):
+    def test_verdict_must_match_what_remains_open(self):
+        review.check_verdict("pass", False)
+        review.check_verdict("changes_requested", True)
+        with self.assertRaisesRegex(ValueError, "pass cannot"):
+            review.check_verdict("pass", True)
+        with self.assertRaisesRegex(ValueError, "needs a blocking"):
+            review.check_verdict("changes_requested", False)
+
+    def test_reviewer_result_shape(self):
         cases = [
-            ("pass_with_blocking_finding", reviewer("pass", [finding()]), "pass cannot"),
-            ("pass_with_open_resolution", reviewer("pass", resolutions=[{"id": "F1", "status": "open", "evidence": "e"}]), "pass cannot"),
-            ("changes_without_blocking", reviewer("changes_requested", [finding("advisory")]), "requires a blocking"),
             ("bad_severity", reviewer("changes_requested", [finding("critical")]), "severity"),
+            ("dropped_without_evidence", reviewer("pass", dropped=[{"id": "N1"}]), "dropped"),
             ("negative_line", reviewer("changes_requested", [{**finding(), "line": -1}]), "line"),
             ("extra_field", reviewer("changes_requested", [{**finding(), "fix": "x"}]), "exactly"),
         ]

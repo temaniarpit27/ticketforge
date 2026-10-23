@@ -275,6 +275,14 @@ class Store:
             if t["version"] != data.get("reviewed_version"):
                 self._post(db, key, "input-during-merge", "New input arrived at the merge boundary. It was not included in the merged review. Please create a follow-up ticket; the completed merge cannot be retroactively changed.")
 
+    def finish(self, key, state):
+        """Move a ticket the agent no longer works on to merged/closed, without a version check."""
+        if state not in ("merged", "closed"):
+            raise ValueError("finish() only records merged or closed")
+        with self.transaction() as db:
+            db.execute("UPDATE tickets SET state=? WHERE key=?", (state, key))
+            self._event(db, key, state, {"observed": True})
+
     def annotate(self, key, **changes):
         """Set data fields without a version check. Only for finished (merged/closed) tickets,
         where no agent run can be in progress."""

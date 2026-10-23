@@ -115,7 +115,7 @@ class MixedProviderTests(unittest.TestCase):
         anthropic, anthropic_requests = recorder([{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "a1", "name": "finish",
             "input": {"status": "ready", "summary": "done", "questions": [], "responses": [], "notes": "", "lessons": []}}]}])
         openai, openai_requests = recorder([{"status": "completed", "output": [call_item("o1", "finish", json.dumps(
-            {"status": "pass", "summary": "ok", "questions": [], "findings": [], "resolutions": []}))]}])
+            {"status": "pass", "summary": "ok", "questions": [], "findings": [], "resolutions": [], "dropped": []}))]}])
         runner = agents(cfg(), {"anthropic": anthropic, "openai": openai})
         self.assertEqual(runner.run("coder", Path("/unused"), {}, lambda: None, lambda e: None)["status"], "ready")
         self.assertEqual(runner.run("reviewer", Path("/unused"), {}, lambda: None, lambda e: None)["status"], "pass")
@@ -123,7 +123,7 @@ class MixedProviderTests(unittest.TestCase):
         self.assertEqual((openai_requests[0][1]["model"], openai_requests[0][1]["max_output_tokens"]), ("codex-model", 25000))
 
     def test_finish_hook_can_continue_the_same_conversation(self):
-        first = {"status": "pass", "summary": "independent", "questions": [], "findings": [], "resolutions": []}
+        first = {"status": "pass", "summary": "independent", "questions": [], "findings": [], "resolutions": [], "dropped": []}
         final = {**first, "summary": "reconciled", "resolutions": [{"id": "F1", "status": "resolved", "evidence": "fixed"}]}
         openai, requests = recorder([
             {"status": "completed", "output": [call_item("o1", "finish", json.dumps(first))]},
@@ -141,6 +141,29 @@ class MixedProviderTests(unittest.TestCase):
         reply = requests[1][1]["input"][-1]
         self.assertEqual(reply["call_id"], "o1")
         self.assertIn("reconcile", reply["output"])
+
+    def test_coordinator_reply_survives_history_trimming(self):
+        # From the external review: the reconciliation reply had no recoverable id, so trimming
+        # could drop it while the coordinator still required those findings to be resolved.
+        first = {"status": "pass", "summary": "s", "questions": [], "findings": [], "resolutions": [], "dropped": []}
+        final = {**first, "resolutions": [{"id": "F1", "status": "resolved", "evidence": "fixed"}]}
+        responses = [{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "a0", "name": "finish", "input": first}]}]
+        responses += [{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": f"s{n}", "name": "shell",
+                                                                "input": {"command": "cat big"}}]} for n in range(6)]
+        responses += [{"stop_reason": "tool_use", "content": [{"type": "tool_use", "id": "a9", "name": "finish", "input": final}]}]
+        http, requests = recorder(responses)
+        replies = []
+
+        def hook(result):
+            replies.append(result)
+            return {"phase": "reconcile", "prior_findings": [{"id": "F1", "problem": "PINNED_PRIOR_FINDING"}]} if len(replies) == 1 else None
+
+        runner = agents(cfg(max_agent_steps=10, max_input_chars=6000, reviewer_provider="anthropic"), {"anthropic": http},
+                        SimpleNamespace(run=lambda *a, **kw: {"exit_code": 0, "output": "y" * 1500}))
+        runner.run("reviewer", Path("/unused"), {"spec": "task"}, lambda: None, lambda e: None, on_finish=hook)
+        last = requests[-1][1]["messages"]
+        self.assertTrue(all(m.get("content", [{}])[0].get("tool_use_id") != "a0" for m in last[1:] if isinstance(m.get("content"), list)))
+        self.assertIn("PINNED_PRIOR_FINDING", last[0]["content"])
 
     def test_hook_rejection_is_returned_as_tool_error(self):
         bad = {"status": "ready", "summary": "s", "questions": [], "responses": [], "notes": "", "lessons": []}
@@ -188,6 +211,22 @@ class ChatSessionTests(unittest.TestCase):
         self.assertEqual(replay[2]["tool_calls"][0]["id"], "t1")
         self.assertEqual(replay[3], {"role": "tool", "tool_call_id": "t1", "content": "result"})
 
+    def test_provider_required_fields_are_sent_back(self):
+        # DeepSeek's thinking mode returns 400 unless reasoning_content is sent back with tool calls.
+        call = {"id": "t1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}
+        http, requests = recorder([
+            {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": None,
+                                                                      "reasoning_content": "thinking", "other": "x", "tool_calls": [call]}}]},
+            {"choices": [{"finish_reason": "stop", "message": {"content": "done"}}]},
+        ])
+        session = OpenAIChatSession(http, "deepseek-model", "s", TOOLS, "t", 100, 100000, {"replay_fields": ["reasoning_content"]})
+        session.step(lambda: None)
+        session.respond([{"id": "t1", "content": "ok", "is_error": False}])
+        session.step(lambda: None)
+        replayed = requests[1][1]["messages"][2]
+        self.assertEqual(replayed["reasoning_content"], "thinking")
+        self.assertNotIn("other", replayed)
+
     def test_content_filter_and_refusal_are_refused(self):
         for choice in ({"finish_reason": "content_filter", "message": {}}, {"finish_reason": "stop", "message": {"refusal": "no"}}):
             http, _ = recorder([{"choices": [choice]}])
@@ -229,6 +268,7 @@ class ProviderSpecTests(unittest.TestCase):
             ("secret_in_config", {"api": "openai-chat", "base_url": "https://a/v1", "api_key": "sk-123"}, "allowed fields"),
             ("bad_env_name", {"api": "openai-chat", "base_url": "https://a/v1", "api_key_env": "lower"}, "environment variable"),
             ("bad_timeout", {"api": "openai-chat", "base_url": "https://a/v1", "api_key_env": "K", "timeout_seconds": 0}, "timeout"),
+            ("bad_replay_field", {"api": "openai-chat", "base_url": "https://a/v1", "api_key_env": "K", "replay_fields": ["tool_calls"]}, "replay_fields"),
         ]
         for name, spec, message in cases:
             with self.subTest(name), self.assertRaisesRegex(ValueError, message):
@@ -239,7 +279,7 @@ class ProviderSpecTests(unittest.TestCase):
             {"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "1", "type": "function", "function": {
                 "name": "finish", "arguments": json.dumps({"status": "ready", "summary": "s", "questions": [], "responses": [], "notes": "", "lessons": []})}}]}}]},
             {"choices": [{"finish_reason": "tool_calls", "message": {"tool_calls": [{"id": "2", "type": "function", "function": {
-                "name": "finish", "arguments": json.dumps({"status": "pass", "summary": "s", "questions": [], "findings": [], "resolutions": []})}}]}}]},
+                "name": "finish", "arguments": json.dumps({"status": "pass", "summary": "s", "questions": [], "findings": [], "resolutions": [], "dropped": []})}}]}}]},
         ])
         shared = cfg(coder_provider="local", reviewer_provider="local", coder_model="same", reviewer_model="same",
                      model_providers={"local": {"api": "openai-chat", "base_url": "http://127.0.0.1:8000/v1", "auth": "none"}})
