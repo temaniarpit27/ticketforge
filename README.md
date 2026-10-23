@@ -304,3 +304,10 @@ your remote credentials and repository policies are correct.
   and protected. The CLI creates files with a restrictive permission mask.
 
 See [docs/architecture.md](docs/architecture.md) for the state machine and extension points.
+
+## Design review and interview preparation
+
+- [Deployment, similar systems, and implementation review](docs/landscape-and-review.md):
+  where execution happens, findings from the first review, and the next verification milestones.
+- [Differentiation and interview answers](docs/differentiation-and-interview.md):
+  build versus buy, the current value hypothesis, evidence limits, and questions to prepare for.
